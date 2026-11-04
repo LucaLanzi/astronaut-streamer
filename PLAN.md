@@ -1,8 +1,9 @@
 # astronaut-streamer — Implementation Plan
 
-> **Status:** plan, nothing implemented yet. The first round of questions is
-> answered (see [§9 Decisions](#9-decisions)). Items still marked *(assumed)*
-> wait on the [remaining questions](#10-remaining-questions).
+> **Status:** Phase 0 tools are written (`jetson/hotspot.sh`,
+> `pi/pi_install_me.sh`, `pi/probe_devices.py`); Phase 1 is next. Answered
+> questions are in [§9 Decisions](#9-decisions); items still marked
+> *(assumed)* wait on the [remaining questions](#10-remaining-questions).
 
 ## 1. Goal
 
@@ -18,8 +19,9 @@ Send live **video + audio** from a USB camera on a **Raspberry Pi 4B**
 - the Jetson can also **watch and listen** locally, for bench testing.
 
 Audio is **one-way** (astronaut → ground). Nothing is recorded. The Pi runs
-**Ubuntu 22.04 Desktop**; the Jetson is an **Orin on JetPack 6** (Ubuntu
-22.04). Priority: **simplest thing that works reliably**.
+**Raspberry Pi OS Lite 64-bit (Bookworm)** and also has a **USB speaker**
+(§3.6); the Jetson is an **Orin on JetPack 6** (Ubuntu 22.04). Priority:
+**simplest thing that works reliably**.
 
 ### Acceptance criteria (proposed)
 
@@ -120,7 +122,7 @@ OBS was considered for the sender. It doesn't fit on the Pi or the Jetson:
 - Its usual RTMP output carries AAC audio. The browser's WebRTC player needs
   Opus and MediaMTX doesn't convert, so the ground station would get **no
   sound**. OBS's WHIP output (Opus) fixes this but needs OBS 30+, newer than
-  Ubuntu 22.04's package.
+  the packages for Raspberry Pi OS Bookworm or Ubuntu 22.04.
 - It only *sends* streams. The Jetson would still need MediaMTX and Flask.
 
 Where it can help: on the **ground-station laptop**, as an optional extra. An
@@ -181,10 +183,11 @@ the Jetson.
   or `iw dev wlan0 set power_save off`). Power saving causes periodic
   latency spikes on streaming links.
 - Band and channel: **2.4 GHz channel 6** *(decided)*. It has the best
-  range, and it keeps the hotspot out of the Prism link's band if that link
-  is 5 GHz (PrismStation 5AC; confirm in R2). Set the regulatory domain
-  (`iw reg set US`). Mount the Jetson's Wi-Fi antennas away from the Prism
-  horn.
+  range. The Prism link's airMAX protocol isn't visible to normal Wi-Fi
+  *(decided: band doesn't matter)*, but it still puts out 5 GHz radio
+  energy, so staying on 2.4 GHz also keeps the two links from slowing each
+  other down. `hotspot.sh` sets the regulatory domain (`iw reg set US`).
+  Mount the Jetson's Wi-Fi antennas away from the Prism horn.
 - Check first that the Jetson's Wi-Fi card supports AP mode:
   `iw list | grep -A10 "Supported interface modes"` must list `AP`.
 
@@ -230,34 +233,37 @@ from its heartbeat.
 
 ### 3.2 Pi sender
 
-**Packages:** `ffmpeg v4l-utils alsa-utils` (apt). No pip packages.
+**Packages:** `ffmpeg v4l-utils alsa-utils iw openssh-server` (apt). No pip
+packages. `pi/pi_install_me.sh` installs them.
 
-**Ubuntu Desktop on the Pi** *(decided)*. Four things to handle:
-- **Wi-Fi:** NetworkManager is already installed. The installer saves the
-  hotspot (`nmcli dev wifi connect ASTRO-LINK password …`) with autoconnect
-  and the highest priority, so the Pi doesn't join a known lab/home network
-  instead. It sets the fixed address
-  (`ipv4.method manual ipv4.addresses 10.42.0.2/24 ipv4.gateway 10.42.0.1`)
-  and turns off Wi-Fi power saving.
-- **SSH:** Ubuntu Desktop doesn't include an SSH server. The installer adds
-  `openssh-server` and enables it, so the Pi can be reached through the
-  Jetson (§3.1).
-- **Mic access:** the desktop's PulseAudio can hold the USB mic open, and
-  then ffmpeg's direct ALSA open fails with "Device or resource busy".
-  `sender.py` runs as a system service (no desktop login needed) and opens
-  the mic through ALSA. Phase 0 checks for the busy error.
-- **CPU:** the desktop takes CPU and RAM away from encoding. Recommended for
-  missions: boot to text mode (`sudo systemctl set-default multi-user.target`).
-  With no desktop session, PulseAudio isn't running to grab the mic either.
-  Switch back with `graphical.target` for setup work.
+**Raspberry Pi OS Lite 64-bit (Bookworm) on the Pi** *(decided)*:
+- **Wi-Fi:** Bookworm uses NetworkManager, Lite included. Pi OS keeps Wi-Fi
+  switched off until a Wi-Fi country is set, so the installer sets it
+  (`raspi-config nonint do_wifi_country US`) and unblocks it. It saves the
+  hotspot as `astro-link` with autoconnect and the highest priority, so the
+  Pi doesn't join a known lab/home network instead, with the fixed address
+  (`ipv4.method manual ipv4.addresses 10.42.0.2/24 ipv4.never-default yes`)
+  and Wi-Fi power saving off.
+- **SSH:** installed but off unless it was enabled in Raspberry Pi Imager.
+  The installer enables it, so the Pi can be reached through the Jetson
+  (§3.1).
+- **No desktop and no audio server.** Nothing else holds the mic or the
+  speaker, and all four cores are free for encoding. The sender opens both
+  directly through ALSA.
+- **Hardware encoder:** Raspberry Pi OS's ffmpeg carries the Pi's patches,
+  and the Pi 4's H.264 encoder (`h264_v4l2m2m`, `/dev/video11`) is normally
+  available. Phase 0 confirms and benchmarks it.
+- **Python 3.11.** The Pi tools use the standard library only.
 
 **Device discovery** (`sender.py`):
 - Camera: use the stable `/dev/v4l/by-id/usb-<name>-video-index0` path, not
   `/dev/videoN`. On a Pi, `/dev/video10–18` are the Pi's own codec/ISP nodes,
   and each UVC camera creates two nodes (video + metadata).
-- Mic: match the camera's USB name in `/proc/asound/cards` and use
-  `plughw:CARD=<name>,DEV=0`. Card numbers change between boots; names don't.
-  `plughw` lets ALSA convert sample rate and channel count for us.
+- Mic: the capture device on the **same USB device** as the camera (matched
+  through sysfs), so the USB speaker, or a speakerphone with its own mic, is
+  never picked by mistake. Opened as `plughw:CARD=<name>,DEV=0`: card numbers
+  change between boots; names don't. `plughw` lets ALSA convert sample rate
+  and channel count for us. `MIC_MATCH` overrides auto-detection.
 - Check that the requested mode exists (`v4l2-ctl --list-formats-ext`). If it
   doesn't, fall back to the closest MJPEG mode.
 
@@ -278,10 +284,10 @@ ffmpeg -hide_banner -loglevel warning \
 - Audio is **Opus**, which WebRTC requires (MediaMTX doesn't transcode).
   `aresample=async=1` corrects the mic's clock drifting against the camera's
   over long runs.
-- **Hardware encoder:** try `-c:v h264_v4l2m2m -pix_fmt yuv420p` first (the
-  Pi 4's encoder at `/dev/video11`). It has worked on Pi kernels, but it hasn't
-  been confirmed on Ubuntu 22.04 for Pi, so Phase 0 tests it. If it fails,
-  use `libx264 ultrafast`: about 1–2 Pi 4 cores at 720p30, much less at 480p.
+- **Hardware encoder:** use `-c:v h264_v4l2m2m -pix_fmt yuv420p` (the Pi 4's
+  encoder at `/dev/video11`) if `probe_devices.py` shows it working with
+  headroom. Otherwise `libx264 ultrafast`: about 1–2 Pi 4 cores at 720p30,
+  much less at 480p.
 - Transport: **RTSP over TCP** to begin with (simple, never corrupts frames).
   If field tests show latency creeping up on a weak link, switch to **SRT**
   (`srt://10.42.0.1:8890?streamid=publish:astronaut&latency=200000`), which
@@ -297,8 +303,8 @@ ffmpeg -hide_banner -loglevel warning \
 4. If ffmpeg exits or stalls (no progress for 5 s), kill it, wait with
    backoff (1, 2, 4 … max 10 s), **find the devices again** (handles a
    replugged camera), and restart.
-5. **Mic missing, camera present:** stream video only and report it.
-   **Camera missing:** keep retrying and report it. *(assumed)*
+5. **Mic missing or failing, camera present:** stream video only and report
+   it *(decided)*. **Camera missing:** keep retrying and report it.
 6. Every 2 s, `POST` a heartbeat to `http://10.42.0.1:8080/api/heartbeat`:
    Pi IP, Wi-Fi RSSI and bitrate (`iw dev wlan0 link`), CPU temperature,
    throttle flags (`vcgencmd get_throttled`), ffmpeg fps and bitrate, device
@@ -371,6 +377,33 @@ enough.
 - Not installed as a service: normal use is through the ground station.
   Plug a monitor and headset into the Jetson when bench testing.
 
+### 3.6 USB speaker on the Pi
+
+The Pi also has a **USB speaker** *(decided)*. The stream stays one-way for
+now (D4), so the speaker isn't used yet. What's already handled, and what
+talk-back from the ground would add:
+
+- **Already handled:** the stream's mic is matched to the camera's USB
+  device (§3.2), so the speaker, or a speakerphone with its own mic, never
+  replaces it. `probe_devices.py --beep` finds the speaker and plays a test
+  tone. `SPEAKER_MATCH` overrides auto-detection.
+- **Talk-back path, if wanted:** the ground-station page captures the
+  operator's mic and publishes it to MediaMTX as a second path, `ground`
+  (WHIP, Opus). The Pi plays it with
+  `ffmpeg -i rtsp://10.42.0.1:8554/ground -f alsa plughw:CARD=<speaker>`.
+  No new servers.
+- **Catch 1, HTTPS:** browsers only allow microphone capture on HTTPS pages
+  (or localhost). The Flask page would need a self-signed certificate
+  (accepted once in the ground-station browser), or that laptop's Chrome
+  started with
+  `--unsafely-treat-insecure-origin-as-secure=http://10.110.0.230:8080`.
+- **Catch 2, echo:** the speaker's sound reaches the camera's mic, so the
+  ground would hear itself about half a second later. The browser's echo
+  cancellation can't remove it, because the echo happens at the Pi. In
+  order of effort: a headset or earpiece instead of an open speaker,
+  push-to-talk on the page (the Pi mic mutes while the ground talks), or
+  echo cancellation on the Pi.
+
 ## 4. Ports
 
 | Port | Proto | Service | Must be reachable from |
@@ -387,25 +420,29 @@ The Jetson already uses **5000/5001** (F´ GDS) and **5900** (spectrometer VNC),
 so Flask stays off Flask's default port 5000. If `ufw` is active, the
 installer opens the ports above.
 
-## 5. Proposed layout
+## 5. Layout
 
-Lives in this repo as `astronaut-streamer/`, next to `RunScienceSpectrometer/`
-*(assumed — could become its own repo/submodule later, see R5)*.
+Its own repo, **`LucaLanzi/astronaut-streamer`**, added to
+billee-hardware-2027 as a submodule at `astronaut-streamer/` on `lucadev`
+*(decided)*, like the F´ submodules. ✓ = written.
 
 ```
 astronaut-streamer/
-├── PLAN.md                     # this file
-├── README.md                   # quick start + troubleshooting (Phase 7)
+├── PLAN.md                     # this file                                              ✓
+├── README.md                   # quick start; troubleshooting added in Phase 7          ✓
 ├── config/
-│   └── astronaut.env           # SSID/PSK, Jetson IP, ports, resolution, bitrate, transport
+│   ├── astronaut.env           # SSID, IPs, ports, resolution, bitrate, device overrides ✓
+│   ├── astronaut.local.env     # per-machine overrides + hotspot password (git-ignored)
+│   └── config.sh               # shell helpers: config loading, password prompt       ✓
 ├── pi/
-│   ├── pi_install_me.sh        # apt deps, join hotspot (fixed IP), SSH server, power-save off, install service
-│   ├── probe_devices.py        # Phase 0: list cameras, modes, mics, HW encoder check
+│   ├── pi_install_me.sh        # packages, Wi-Fi country, SSH, join hotspot (fixed IP) ✓
+│   ├── devices.py              # discovery: camera, its mic, speaker, encoders, health ✓
+│   ├── probe_devices.py        # Phase 0 bench check                                    ✓
 │   ├── sender.py               # supervisor: discovery → ffmpeg → restart/backoff → heartbeat
 │   └── astronaut-sender.service
 ├── jetson/
-│   ├── jetson_install_me.sh    # hotspot, MediaMTX (pinned), venv, services, ufw
-│   ├── hotspot.sh              # create/remove the nmcli hotspot connection
+│   ├── hotspot.sh              # create/start/stop/remove/status the nmcli hotspot      ✓
+│   ├── jetson_install_me.sh    # MediaMTX (pinned), venv, services, ufw
 │   ├── mediamtx.yml
 │   ├── mediamtx.service
 │   ├── app.py                  # Flask web applet
@@ -414,18 +451,18 @@ astronaut-streamer/
 │   ├── astronaut-web.service
 │   └── local_view.sh           # ffplay viewer (bench testing)
 └── tests/
-    └── test_sender_cmd.py      # unit tests for device parsing + ffmpeg command building
+    └── test_devices.py         # device parsing/selection, config, ffmpeg helpers     ✓
 ```
 
-Top-level `Makefile` gains targets in the same style as `make science`:
-`make astronaut pi`, `make astronaut jetson`, `make astronaut view`. The top-level
-README's repository layout gets an entry.
+billee-hardware-2027's top-level `Makefile` gains targets in the same style as
+`make science`: `make astronaut pi`, `make astronaut jetson`,
+`make astronaut view`. Its README's repository layout gets an entry.
 
 ## 6. Phases
 
 | Phase | Work | Exit criteria |
 |---|---|---|
-| **0 — Bench check** | On the Pi: `v4l2-ctl --list-devices / --list-formats-ext`, `arecord -l`, record 5 s through ALSA **while logged into the desktop** (catches PulseAudio "device busy"), test `h264_v4l2m2m`. On the Jetson: `cat /etc/nv_tegra_release`, `iw list` shows AP. Bring the hotspot up, join it from the Pi, run `iperf3` at 5 / 20 / 50 m and through obstacles. Prism link: ping `10.110.0.230` from the ground laptop, then `ssh astronaut-pi` through the Jetson. | Table of camera modes; HW-encoder yes/no; mic opens with the desktop running; measured Wi-Fi throughput vs distance; ground laptop reaches the Jetson and the Pi |
+| **0 — Bench check** | Jetson: `cat /etc/nv_tegra_release`; `sudo jetson/hotspot.sh up` (checks AP support first). Pi: `sudo pi/pi_install_me.sh`, then `pi/probe_devices.py --beep` (camera modes, mic level, speaker tone, hardware + software H.264 benchmarks on a test pattern and the live camera, Wi-Fi link, ping to the Jetson). Join the hotspot, run `iperf3` at 5 / 20 / 50 m and through obstacles. Prism link: ping `10.110.0.230` from the ground laptop, then `ssh astronaut-pi` through the Jetson. | `probe_devices.py` summary with no problems; camera modes and encoder numbers recorded; mic and speaker both work; measured Wi-Fi throughput vs distance; ground laptop reaches the Jetson and the Pi |
 | **1 — Media server + test pattern** | Install MediaMTX; from the Pi, push `ffmpeg -re -f lavfi -i testsrc … -f lavfi -i sine …`; open `http://10.42.0.1:8889/astronaut` on a laptop on the hotspot | Test pattern + tone play in the browser |
 | **2 — Real camera, manual command** | Run the command from §3.2 by hand; tune resolution/bitrate; measure Pi CPU/temp, **latency** (film a stopwatch next to the viewer), **sync** (clap test) | A2, A3, A6 met at the chosen resolution |
 | **3 — `sender.py` + systemd** | Discovery, wait-for-Jetson, backoff restart, video-only fallback, heartbeat, test-pattern mode, unit tests | Unplug/replug camera, kill Wi-Fi, reboot each box in either order → A4, A5 |
@@ -442,8 +479,9 @@ README's repository layout gets an entry.
 | Pi boots before Jetson | `sender.py` waits for `10.42.0.1:8554`, then starts streaming |
 | Wi-Fi drops / out of range | ffmpeg errors out → supervisor retries with backoff; MediaMTX `overridePublisher` accepts the new session even if the old one hasn't timed out yet; viewers see "reconnecting" and resume automatically |
 | Camera unplugged / replugged | ffmpeg exits → devices found again via `by-id` path → resumes |
-| Mic missing or fails | Video continues alone; dashboard flags **"NO AUDIO"** *(assumed)* |
-| PulseAudio on the Pi desktop holds the mic | ffmpeg can't open it → same as above; fixed by booting to text mode (§3.2) |
+| Mic missing or fails | Video continues alone; dashboard flags **"NO AUDIO"** *(decided)* |
+| Mic "device busy" | Same as above. Pi OS Lite runs no audio server, so it's usually a leftover ffmpeg: `sudo fuser -v /dev/snd/*` |
+| USB speaker missing | Nothing changes: the speaker isn't used by the one-way stream (§3.6) |
 | Prism link drops (out of range, antenna knocked off alignment) | Pi → Jetson stream keeps running; the ground-station page shows "reconnecting" and resumes when the link returns |
 | Pi overheats / under-voltage | Heartbeat shows throttle flags; supervisor can step down resolution/bitrate (optional) |
 | Ground station opens page before stream exists | Player waits and connects when the stream appears |
@@ -460,7 +498,8 @@ README's repository layout gets an entry.
 | Risk | Mitigation |
 |---|---|
 | Jetson Wi-Fi chipset/driver doesn't support AP mode well | Phase 0 `iw list` check; fallback: cheap USB Wi-Fi adapter known to do AP, or a small travel router |
-| Pi 4 can't encode 720p30 in software and the HW encoder doesn't work on Ubuntu 22.04 | Drop to 640×480 or 960×540 @ 30; or 720p @ 15 |
+| Pi 4 can't encode 720p30 in software and the hardware encoder doesn't work | Drop to 640×480 or 960×540 @ 30; or 720p @ 15 |
+| Talk-back is added later and the ground hears itself | Headset or push-to-talk first; echo cancellation on the Pi if needed (§3.6) |
 | A/V sync drifts with ffmpeg's separate v4l2/ALSA inputs | Wallclock timestamps + `aresample=async=1`; if the clap test still fails, switch the sender to a GStreamer pipeline (shared pipeline clock) — same RTSP output, nothing else changes |
 | Latency creeps up over TCP on a weak link | Switch transport to SRT (config flag) |
 | Prism link throughput at competition distance, shared with other rover traffic | Measure in Phase 6; bitrate is one setting; 480p @ ~800 kbps is still usable |
@@ -480,22 +519,22 @@ Answered 2026-11-04.
 | D6 | Resolution / frame rate | Default accepted: **720p @ 30 fps, ~2 Mbps**; drop to 480p if the Pi can't keep up |
 | D7 | Local viewing on the Jetson | **Bench testing only**; normal use is through the ground station |
 | D8 | Recording | **None**; view only, at the ground station, forwarded by the Jetson |
-| D9 | Pi image | **Ubuntu 22.04 Desktop** |
+| D9 | Pi image | **Raspberry Pi OS Lite 64-bit (Bookworm)** (was Ubuntu 22.04 Desktop) |
 | D10 | Reaching the Pi from the ground | **SSH into the Jetson, then to the Pi over the hotspot** (`ProxyJump`); the Pi stays behind the Jetson's NAT |
 | D11 | Jetson address on the Prism network | **`10.110.0.230`** (fixed); ground station is on the same network through the Prism link |
 | D12 | Viewers and password | **Ground station only, no password** |
 | D13 | Pi power | **Portable battery pack**; out of scope for this plan |
+| D14 | Prism band | **Doesn't matter**: airMAX isn't visible to normal Wi-Fi; the hotspot stays on 2.4 GHz |
+| D15 | Repo | **`LucaLanzi/astronaut-streamer`**, a submodule of billee-hardware-2027 on `lucadev` |
+| D16 | Mic fails | **Keep sending video only**, flagged on the dashboard |
+| D17 | Pi speaker | **USB speaker on the Pi**; reserved for now, audio stays one-way (§3.6) |
 
 ## 10. Remaining questions
 
 Smaller ones; the plan works with the defaults.
 
-- **R2 — Prism band:** is the Prism link on 5 GHz? If it's on 2.4 GHz, the
-  hotspot should move to 5 GHz instead. *Default: 5 GHz, hotspot stays on
-  2.4 GHz.*
-- **R5 — Repo:** folder in this repo, or a separate `astronaut-streamer` repo
-  pulled in as a submodule? *Default: folder in this repo.*
-- **R6 — Mic failure:** keep sending video only, or treat it as a fault?
-  *Default: video only, flagged on the dashboard.*
 - **R7 — More cameras later?** *Default: one; MediaMTX paths are named so more
   can be added (`/astronaut2`).*
+- **R8 — What is the Pi's speaker for?** Hearing the ground station
+  (talk-back), or sounds made on the Pi (alerts, tones)? *Default: reserved;
+  no talk-back until it's asked for.*

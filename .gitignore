@@ -1,0 +1,5 @@
+# Per-machine settings and the hotspot password
+config/astronaut.local.env
+
+__pycache__/
+*.pyc
