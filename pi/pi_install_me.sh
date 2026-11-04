@@ -55,14 +55,12 @@ IFACE="$(wifi_iface "$PI_WIFI_IFACE")"
 nm_has_wifi "$IFACE" || die "no NetworkManager Wi-Fi interface '$IFACE' (see 'nmcli device'; set PI_WIFI_IFACE)"
 ask_psk
 
-info "Installing packages (needs internet)..."
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y ffmpeg v4l-utils alsa-utils iw openssh-server python3
+apt_install ffmpeg v4l-utils alsa-utils iw openssh-server python3
 # vcgencmd (throttle/under-voltage flags) is normally preinstalled; the package
 # was renamed from libraspberrypi-bin to raspi-utils.
 if ! command -v vcgencmd >/dev/null 2>&1; then
-  apt-get install -y raspi-utils || apt-get install -y libraspberrypi-bin ||
+  DEBIAN_FRONTEND=noninteractive apt-get install -y raspi-utils ||
+    DEBIAN_FRONTEND=noninteractive apt-get install -y libraspberrypi-bin ||
     warn "vcgencmd isn't available: the Pi's throttle/under-voltage flags won't be reported"
 fi
 

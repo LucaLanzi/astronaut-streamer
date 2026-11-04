@@ -36,10 +36,7 @@ else
 fi
 
 # ----------------------------------------------------------------- packages
-info "Installing packages (needs internet)..."
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y ffmpeg python3 python3-flask python3-waitress curl ca-certificates \
+apt_install ffmpeg python3 python3-flask python3-waitress curl ca-certificates \
   iw iproute2 network-manager dnsmasq-base
 
 # ----------------------------------------------------------------- MediaMTX

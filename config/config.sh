@@ -26,6 +26,29 @@ report_errors() {
   trap 'rc=$?; src=${BASH_SOURCE[0]:-$0}; printf "error: %s line %s: \"%s\" failed (exit %s)\n" "${src##*/}" "$LINENO" "$BASH_COMMAND" "$rc" >&2' ERR
 }
 
+# The packages among "$@" that aren't installed yet, one per line.
+missing_packages() {
+  local pkg
+  for pkg in "$@"; do
+    # shellcheck disable=SC2016  # ${Status} is dpkg-query's field name
+    dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed" || echo "$pkg"
+  done
+}
+
+# apt-get install "$@", but only when something is missing, so re-running an
+# installer works offline (in the field) once everything is in place.
+apt_install() {
+  local missing
+  mapfile -t missing < <(missing_packages "$@")
+  if [ "${#missing[@]}" -eq 0 ]; then
+    info "Packages already installed (no internet needed)"
+    return 0
+  fi
+  info "Installing ${missing[*]} (needs internet)..."
+  DEBIAN_FRONTEND=noninteractive apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+}
+
 # True if something listens on port $2 ($1 = tcp or udp).
 port_in_use() {
   local flag=-t

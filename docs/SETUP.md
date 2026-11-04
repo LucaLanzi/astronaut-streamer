@@ -145,6 +145,35 @@ it isn't `/24`.
 **Keep the Jetson's internet on Ethernet while you install.** The last step
 turns its Wi-Fi into the hotspot.
 
+**Bench test on a home network, then the rover.** You can test everything at
+home with your home network standing in for the Prism link: the laptop is the
+ground station, and the Jetson's Ethernet has a home address. Only the
+Jetson's Ethernet side differs. The Pi and the hotspot are exactly the same in
+both places.
+
+| | Bench (home network) | Rover (Prism link) |
+|---|---|---|
+| Jetson Ethernet | its home address, e.g. `192.168.4.97/22`, gateway `192.168.4.1` | `10.110.0.230/24`, no gateway |
+| `JETSON_GROUND_IP` in `astronaut.local.env` | `192.168.4.97` | delete the line (the default is `10.110.0.230`) |
+| Ground-station laptop | anywhere on the home network | a `10.110.0.x` address on the Prism network |
+| Dashboard | `http://192.168.4.97:8080` | `http://10.110.0.230:8080` |
+
+To switch the Jetson to the rover setup, run this on the Jetson, from its
+monitor and keyboard or from the Prism side. Changing the address drops an
+SSH session on the old one.
+
+```bash
+sed -i '/^JETSON_GROUND_IP=/d' config/astronaut.local.env
+sudo nmcli connection modify "Wired connection 1" \
+  ipv4.method manual ipv4.addresses 10.110.0.230/24 ipv4.gateway "" ipv4.dns ""
+sudo nmcli device reapply enP8p1s0          # your Ethernet interface
+make restart                                 # MediaMTX picks up the new address
+```
+
+No internet needed: `make restart` doesn't download anything, and re-running
+`make jetson` or `make pi` skips apt once everything is installed. Switch
+back for a bench session the same way, with the bench values.
+
 ```bash
 make jetson
 ```

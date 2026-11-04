@@ -5,8 +5,10 @@ Python side, and the templates render completely.
 """
 
 import os
+import shutil
 import socket
 import subprocess
+import tempfile
 import sys
 import unittest
 from pathlib import Path
@@ -86,6 +88,37 @@ class ShellConfigTests(unittest.TestCase):
         self.assertNotEqual(out.returncode, 0)
         self.assertIn('"false" failed', out.stderr)
         self.assertNotIn("unreachable", out.stdout)
+
+    def fake_dpkg(self, installed):
+        """A PATH dir where dpkg-query knows `installed` and apt-get fails loudly."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        Path(d, "dpkg-query").write_text(
+            "#!/bin/sh\nfor p in " + " ".join(installed) + "; do\n"
+            '  [ "$3" = "$p" ] && { printf "install ok installed"; exit 0; }\ndone\nexit 1\n')
+        Path(d, "apt-get").write_text("#!/bin/sh\necho \"apt-get $*\"\nexit 0\n")
+        for f in ("dpkg-query", "apt-get"):
+            Path(d, f).chmod(0o755)
+        return {"PATH": f"{d}:{os.environ['PATH']}"}
+
+    def test_missing_packages(self):
+        out = bash("set -euo pipefail; report_errors; missing_packages ffmpeg iw python3",
+                   self.fake_dpkg(["ffmpeg", "python3"]))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.split(), ["iw"])
+
+    def test_apt_install_skips_apt_when_all_installed(self):
+        """Re-running an installer in the field (no internet) must not touch apt."""
+        out = bash("set -euo pipefail; report_errors; apt_install ffmpeg iw",
+                   self.fake_dpkg(["ffmpeg", "iw"]))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("already installed", out.stdout)
+        self.assertNotIn("apt-get", out.stdout)
+        out = bash("set -euo pipefail; report_errors; apt_install ffmpeg iw",
+                   self.fake_dpkg(["ffmpeg"]))
+        self.assertIn("apt-get update", out.stdout)
+        self.assertIn("apt-get install -y iw", out.stdout)
+        self.assertNotIn("install -y ffmpeg", out.stdout)
 
     def test_ampersand_stays_literal(self):
         out = bash('X="a&b"; t=$(mktemp); printf "v=@X@\\n" > "$t"; '
