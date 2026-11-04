@@ -128,6 +128,26 @@ OBS Media Source on `rtsp://<jetson-eth0-ip>:8554/astronaut` can add overlays,
 show the feed next to the rover's other cameras, or restream for outreach,
 with no change to the Pi or the Jetson.
 
+### Why not µStreamer?
+
+[µStreamer](https://github.com/pikvm/ustreamer) (from PiKVM) was considered
+for the sender. It's very good at low-latency *video*: it passes the camera's
+own JPEG frames through as MJPEG over HTTP, uses almost no CPU, and recovers
+by itself when the camera is replugged. It doesn't fit here because:
+
+- **No audio in its normal mode.** MJPEG over HTTP is video only. Audio only
+  works through its Janus plugin: a Janus WebRTC server on the Pi, a source
+  build with `WITH_JANUS=1` plus patched Janus headers, and an audio setup
+  documented around an HDMI capture chip (TC358743), not a USB webcam mic.
+- **Bandwidth.** MJPEG at 720p30 is ~10–25 Mbps over the hotspot, versus
+  ~2 Mbps of H.264.
+- **The Jetson can't easily forward it.** MediaMTX's browser outputs (WebRTC,
+  HLS) don't carry MJPEG. Forwarding would need a custom relay in Flask, and a
+  simple proxy opens one Pi stream per viewer.
+
+It would suit **video-only** cameras, such as the rover's drive cameras on
+the Jetson.
+
 ## 3. Components in detail
 
 ### 3.1 Networks
@@ -146,6 +166,15 @@ with no change to the Pi or the Jetson.
   `ipv4.method shared` runs DHCP for the Pi, so the Jetson is always
   **10.42.0.1** on this link *(assumed — change it if this subnet clashes with
   the rover network)*.
+- The hotspot is **its own network, behind NAT on the Jetson**. The Pi can
+  make connections out (to the Jetson, and through it), but nothing on the
+  Prism side can open a connection to the Pi: the ground station has no route
+  to `10.42.0.x`, and NetworkManager's hotspot firewall rules block new
+  inbound connections. That's why the Jetson forwards the stream, and why
+  SSH to the Pi goes through the Jetson (below).
+- DHCP hands out `10.42.0.10–254`. The Pi uses a **fixed address,
+  `10.42.0.2`**, below that range, so it never clashes with a test laptop on
+  the hotspot and is always at the same address for SSH.
 - Turn off Wi-Fi power saving on **both** ends
   (`/etc/NetworkManager/conf.d/wifi-powersave.conf` → `wifi.powersave = 2`,
   or `iw dev wlan0 set power_save off`). Power saving causes periodic
@@ -179,15 +208,41 @@ with no change to the Pi or the Jetson.
   traffic can use up the astronaut link's airtime. Limit DDS to `eth0` (or
   `lo`) in the ROS2 middleware config.
 
+**Reaching the Pi from the ground (SSH)** *(decided)*
+
+SSH into the Jetson, then hop to the Pi over the hotspot. No routing or
+firewall changes are needed. On the ground-station laptop, `~/.ssh/config`:
+
+```
+Host jetson
+    HostName <jetson-eth0-ip>
+    User <jetson-user>
+
+Host astronaut-pi
+    HostName 10.42.0.2
+    User <pi-user>
+    ProxyJump jetson
+```
+
+Then `ssh astronaut-pi` (or `scp file astronaut-pi:`) goes through the Jetson
+in one command. Run `ssh-copy-id jetson` and `ssh-copy-id astronaut-pi` once
+so it doesn't ask for two passwords. The dashboard also shows the Pi's IP
+from its heartbeat.
+
 ### 3.2 Pi sender
 
 **Packages:** `ffmpeg v4l-utils alsa-utils` (apt). No pip packages.
 
-**Ubuntu Desktop on the Pi** *(decided)*. Three things to handle:
+**Ubuntu Desktop on the Pi** *(decided)*. Four things to handle:
 - **Wi-Fi:** NetworkManager is already installed. The installer saves the
   hotspot (`nmcli dev wifi connect ASTRO-LINK password …`) with autoconnect
   and the highest priority, so the Pi doesn't join a known lab/home network
-  instead. It also turns off Wi-Fi power saving.
+  instead. It sets the fixed address
+  (`ipv4.method manual ipv4.addresses 10.42.0.2/24 ipv4.gateway 10.42.0.1`)
+  and turns off Wi-Fi power saving.
+- **SSH:** Ubuntu Desktop doesn't include an SSH server. The installer adds
+  `openssh-server` and enables it, so the Pi can be reached through the
+  Jetson (§3.1).
 - **Mic access:** the desktop's PulseAudio can hold the USB mic open, and
   then ffmpeg's direct ALSA open fails with "Device or resource busy".
   `sender.py` runs as a system service (no desktop login needed) and opens
@@ -345,7 +400,7 @@ astronaut-streamer/
 ├── config/
 │   └── astronaut.env           # SSID/PSK, Jetson IP, ports, resolution, bitrate, transport
 ├── pi/
-│   ├── pi_install_me.sh        # apt deps, join hotspot, power-save off, install service
+│   ├── pi_install_me.sh        # apt deps, join hotspot (fixed IP), SSH server, power-save off, install service
 │   ├── probe_devices.py        # Phase 0: list cameras, modes, mics, HW encoder check
 │   ├── sender.py               # supervisor: discovery → ffmpeg → restart/backoff → heartbeat
 │   └── astronaut-sender.service
@@ -371,7 +426,7 @@ README's repository layout gets an entry.
 
 | Phase | Work | Exit criteria |
 |---|---|---|
-| **0 — Bench check** | On the Pi: `v4l2-ctl --list-devices / --list-formats-ext`, `arecord -l`, record 5 s through ALSA **while logged into the desktop** (catches PulseAudio "device busy"), test `h264_v4l2m2m`. On the Jetson: `cat /etc/nv_tegra_release`, `iw list` shows AP. Bring the hotspot up, join it from the Pi, run `iperf3` at 5 / 20 / 50 m and through obstacles. Prism link: confirm bridge mode, ping the Jetson's `eth0` IP from the ground laptop. | Table of camera modes; HW-encoder yes/no; mic opens with the desktop running; measured Wi-Fi throughput vs distance; ground laptop reaches the Jetson |
+| **0 — Bench check** | On the Pi: `v4l2-ctl --list-devices / --list-formats-ext`, `arecord -l`, record 5 s through ALSA **while logged into the desktop** (catches PulseAudio "device busy"), test `h264_v4l2m2m`. On the Jetson: `cat /etc/nv_tegra_release`, `iw list` shows AP. Bring the hotspot up, join it from the Pi, run `iperf3` at 5 / 20 / 50 m and through obstacles. Prism link: confirm bridge mode, ping the Jetson's `eth0` IP from the ground laptop, then `ssh astronaut-pi` through the Jetson. | Table of camera modes; HW-encoder yes/no; mic opens with the desktop running; measured Wi-Fi throughput vs distance; ground laptop reaches the Jetson and the Pi |
 | **1 — Media server + test pattern** | Install MediaMTX; from the Pi, push `ffmpeg -re -f lavfi -i testsrc … -f lavfi -i sine …`; open `http://10.42.0.1:8889/astronaut` on a laptop on the hotspot | Test pattern + tone play in the browser |
 | **2 — Real camera, manual command** | Run the command from §3.2 by hand; tune resolution/bitrate; measure Pi CPU/temp, **latency** (film a stopwatch next to the viewer), **sync** (clap test) | A2, A3, A6 met at the chosen resolution |
 | **3 — `sender.py` + systemd** | Discovery, wait-for-Jetson, backoff restart, video-only fallback, heartbeat, test-pattern mode, unit tests | Unplug/replug camera, kill Wi-Fi, reboot each box in either order → A4, A5 |
@@ -427,6 +482,7 @@ Answered 2026-11-04.
 | D7 | Local viewing on the Jetson | **Bench testing only**; normal use is through the ground station |
 | D8 | Recording | **None**; view only, at the ground station, forwarded by the Jetson |
 | D9 | Pi image | **Ubuntu 22.04 Desktop** |
+| D10 | Reaching the Pi from the ground | **SSH into the Jetson, then to the Pi over the hotspot** (`ProxyJump`); the Pi stays behind the Jetson's NAT |
 
 ## 10. Remaining questions
 
