@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=SCRIPTDIR/../config/config.sh
 . "$SCRIPT_DIR/../config/config.sh"
 load_config
+report_errors
 
 UNITS=(astronaut-mediamtx astronaut-web)
 
@@ -61,8 +62,10 @@ HOTSPOT_IFACE="$(wifi_iface "$JETSON_HOTSPOT_IFACE")"
 GROUND_IFACE="${JETSON_GROUND_IFACE:-$(iface_with_ip "$JETSON_GROUND_IP")}"
 [ -n "$HOTSPOT_IFACE" ] || warn "no Wi-Fi interface found: the hotspot can't run (PLAN.md §8: USB Wi-Fi fallback)"
 if [ -z "$GROUND_IFACE" ]; then
-  warn "no interface has $JETSON_GROUND_IP: the ground station can't reach the dashboard until the"
-  warn "Jetson's Ethernet has that address (set it in NetworkManager, then re-run this installer)"
+  warn "no interface has JETSON_GROUND_IP=$JETSON_GROUND_IP. That setting is this Jetson's OWN"
+  warn "address on the Prism side (normally 10.110.0.230), not the Pi's. Check config/astronaut*.env,"
+  warn "and give the Jetson's Ethernet that address (docs/SETUP.md §5), then re-run this installer."
+  warn "Continuing: the dashboard still works on every address the Jetson has."
 fi
 # Offer WebRTC only on the Prism-side and hotspot interfaces when both are
 # known; otherwise every interface, so the ground station is never left out.
@@ -79,18 +82,13 @@ info "Interfaces: ground=${GROUND_IFACE:-?}  hotspot=${HOTSPOT_IFACE:-?}"
 info "Stopping old astronaut-streamer services (if any) to check ports..."
 systemctl stop "${UNITS[@]}" 2>/dev/null || true
 
-port_owner() {  # $1 = tcp|udp, $2 = port: the program listening there, if any
-  local flag=-t
-  [ "$1" = udp ] && flag=-u
-  ss -H -l -n -p "$flag" "sport = :$2" 2>/dev/null | grep -o 'users:(("[^"]*"' | head -1 | cut -d'"' -f2
-}
 busy=()
 for spec in "tcp $WEB_PORT WEB_PORT" "tcp $RTSP_PORT RTSP_PORT" "tcp $WEBRTC_PORT WEBRTC_PORT" \
   "tcp $HLS_PORT HLS_PORT" "tcp $MEDIAMTX_API_PORT MEDIAMTX_API_PORT" \
   "udp $WEBRTC_UDP_PORT WEBRTC_UDP_PORT" "udp $SRT_PORT SRT_PORT"; do
   read -r proto port name <<<"$spec"
-  owner="$(port_owner "$proto" "$port")"
-  if [ -n "$owner" ] || ss -H -l -n "-${proto:0:1}" "sport = :$port" 2>/dev/null | grep -q .; then
+  if port_in_use "$proto" "$port"; then
+    owner="$(port_owner "$proto" "$port")"
     busy+=("$port/$proto ($name) is used by ${owner:-another program}")
   fi
 done

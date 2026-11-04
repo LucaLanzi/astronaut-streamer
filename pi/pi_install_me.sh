@@ -17,6 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=SCRIPTDIR/../config/config.sh
 . "$SCRIPT_DIR/../config/config.sh"
 load_config
+report_errors
 
 CON_NAME="astro-link"
 UNIT="astronaut-sender"

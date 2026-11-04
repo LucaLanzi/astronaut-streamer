@@ -120,10 +120,30 @@ so it never collides with a real install.
 
 ## 5. Jetson
 
-**Before you start:** JetPack 6 is installed, and the Jetson's Ethernet already
-has its fixed address `10.110.0.230` on the rover network (check with
-`ip -4 addr`; set it in NetworkManager if not, with the netmask and gateway
-your rover network uses).
+**Before you start:** JetPack 6 is installed, and the Jetson's Ethernet has its
+fixed Prism-side address, `10.110.0.230`. `JETSON_GROUND_IP` is that address:
+the Jetson's own, not the Pi's.
+
+To add it **without losing your home network** (internet, SSH), keep DHCP on
+and add the fixed address next to it:
+
+```bash
+nmcli -f NAME,DEVICE,TYPE connection show       # e.g. "Wired connection 1" on eth0
+sudo nmcli connection modify "Wired connection 1" \
+  ipv4.method auto ipv4.addresses 10.110.0.230/24 ipv4.gateway "" ipv4.dhcp-timeout infinity
+sudo nmcli device reapply eth0                   # enP8p1s0 on an Orin Nano
+ip -4 addr show eth0                             # your DHCP address and 10.110.0.230
+```
+
+No gateway on the fixed address, so your internet route stays as it is.
+`dhcp-timeout infinity` keeps the connection up where there's no DHCP server,
+as on the Prism link. Check that once on the bench: plug the Jetson's
+Ethernet straight into a laptop, wait 2 minutes, and `10.110.0.230` must
+still be in `ip -4 addr` (checklist B.2). Use your rover network's netmask if
+it isn't `/24`.
+
+**Keep the Jetson's internet on Ethernet while you install.** The last step
+turns its Wi-Fi into the hotspot.
 
 ```bash
 make jetson

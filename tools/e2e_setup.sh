@@ -10,6 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=SCRIPTDIR/../config/config.sh
 . "$SCRIPT_DIR/../config/config.sh"
 load_config
+report_errors
 
 VENV="${E2E_VENV:-$ASTRO_ROOT/.e2e-venv}"
 need python3 curl tar

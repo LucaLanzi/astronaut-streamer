@@ -5,6 +5,7 @@ Python side, and the templates render completely.
 """
 
 import os
+import socket
 import subprocess
 import sys
 import unittest
@@ -64,6 +65,27 @@ class ShellConfigTests(unittest.TestCase):
         out = self.render("jetson/astronaut-web.service.in")   # no SERVICE_USER
         self.assertNotEqual(out.returncode, 0)
         self.assertIn("SERVICE_USER", out.stderr)
+
+    def test_port_helpers_survive_strict_mode(self):
+        """Regression: port_owner on a free port used to end the Jetson
+        installer silently (grep finding nothing + pipefail + set -e)."""
+        out = bash('set -euo pipefail; owner="$(port_owner tcp 1)"; '
+                   'if port_in_use tcp 1; then echo busy; else echo free; fi; echo "done:[$owner]"')
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.split(), ["free", "done:[]"])
+
+    def test_port_in_use_sees_a_listener(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen()
+            out = bash(f"set -euo pipefail; port_in_use tcp {s.getsockname()[1]} && echo busy")
+        self.assertEqual(out.stdout.strip(), "busy")
+
+    def test_unexpected_failures_are_reported(self):
+        out = bash("set -euo pipefail; report_errors; false; echo unreachable")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn('"false" failed', out.stderr)
+        self.assertNotIn("unreachable", out.stdout)
 
     def test_ampersand_stays_literal(self):
         out = bash('X="a&b"; t=$(mktemp); printf "v=@X@\\n" > "$t"; '

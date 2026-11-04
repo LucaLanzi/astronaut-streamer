@@ -18,6 +18,30 @@ require_root() {
   [ "$(id -u)" -eq 0 ] || die "run this with sudo"
 }
 
+# For the installers (which run with `set -e`): if a command fails
+# unexpectedly, say which one and where instead of stopping silently.
+report_errors() {
+  set -E
+  # shellcheck disable=SC2016,SC2154  # expanded (and rc, src set) when the trap fires
+  trap 'rc=$?; src=${BASH_SOURCE[0]:-$0}; printf "error: %s line %s: \"%s\" failed (exit %s)\n" "${src##*/}" "$LINENO" "$BASH_COMMAND" "$rc" >&2' ERR
+}
+
+# True if something listens on port $2 ($1 = tcp or udp).
+port_in_use() {
+  local flag=-t
+  if [ "$1" = udp ]; then flag=-u; fi
+  ss -H -l -n "$flag" "sport = :$2" 2>/dev/null | grep -q .
+}
+
+# The program listening on port $2 ($1 = tcp or udp); empty if none or if
+# it can't be seen. Never fails, so it's safe in `x="$(port_owner ...)"`
+# under `set -euo pipefail`.
+port_owner() {
+  local flag=-t
+  if [ "$1" = udp ]; then flag=-u; fi
+  ss -H -l -n -p "$flag" "sport = :$2" 2>/dev/null | grep -o 'users:(("[^"]*"' | head -1 | cut -d'"' -f2 || true
+}
+
 # Read config/astronaut.env, then config/astronaut.local.env on top. A variable
 # already set in the environment wins over both (`sudo HOTSPOT_CHANNEL=11 ...`),
 # matching pi/devices.py's load_config(). Values are read as plain text, never

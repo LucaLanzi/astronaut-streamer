@@ -66,7 +66,7 @@ make e2e        # real MediaMTX + dashboard + test-pattern sender, checked in
                 # headless Chrome, including recovery from failures
 ```
 
-Tested on Python 3.10 with Flask 2.0.1 and waitress 2.0.0 (what the Jetson's
+Tested on Python 3.10 with Flask 2.0.1 and waitress 1.4.4 (what the Jetson's
 Ubuntu 22.04 ships), and on current Python and Flask.
 
 To work on it, push to `main` here, then update the submodule pointer on

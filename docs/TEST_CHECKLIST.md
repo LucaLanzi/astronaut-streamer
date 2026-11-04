@@ -34,7 +34,9 @@ The targets come from [PLAN.md §1](../PLAN.md#acceptance-criteria-proposed):
 
 - [ ] **B.1** JetPack 6: `head -1 /etc/nv_tegra_release` shows `R36`.
 - [ ] **B.2** The Prism-side Ethernet has the fixed address:
-      `ip -4 addr | grep 10.110.0.230` prints a line.
+      `ip -4 addr | grep 10.110.0.230` prints a line. Also with **no DHCP
+      server**: plug the Ethernet straight into a laptop, wait 2 minutes,
+      and check again (SETUP.md §5).
 - [ ] **B.3** The Wi-Fi card can be a hotspot:
       `iw list | grep -A8 "Supported interface modes"` includes `* AP`.
 - [ ] **B.4** `make jetson` ends with `Done.` and lists
