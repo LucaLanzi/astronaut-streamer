@@ -5,7 +5,7 @@
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
-.PHONY: help jetson hotspot view pi probe test-pattern status logs restart uninstall test lint e2e
+.PHONY: help jetson hotspot view pi probe test-pattern push-pi status logs restart uninstall test lint e2e
 
 SENDER := astronaut-sender
 UNITS  := astronaut-mediamtx astronaut-web astronaut-sender
@@ -51,6 +51,9 @@ probe: ## [Pi] bench check: camera, mic, speaker tone, encoders, Wi-Fi
 
 test-pattern: ## [Pi] send colour bars + 440 Hz tone instead of the camera (Ctrl-C stops)
 	@$(call with_sender_paused,python3 pi/sender.py --test-pattern)
+
+push-pi: ## [laptop] push this commit to the Pi through the Jetson (no internet), restart it
+	@bash tools/push_pi.sh
 
 # ------------------------------------------------------------------ either
 status: ## Services, hotspot/Wi-Fi and stream state on this machine

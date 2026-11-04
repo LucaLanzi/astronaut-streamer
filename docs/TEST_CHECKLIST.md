@@ -88,7 +88,11 @@ The targets come from [PLAN.md §1](../PLAN.md#acceptance-criteria-proposed):
       devices" and shows `10.42.0.2`.
 - [ ] **E.3** From the ground station, `ssh astronaut-pi` works (through the
       Jetson).
-- [ ] **E.4** Throughput: install `iperf3` on both. Run `iperf3 -s` on the
+- [ ] **E.4** Code updates without internet: commit a harmless change on the
+      laptop (e.g. a comment), then `make push-pi` → it ends with
+      `astronaut-sender restarted`, and `ssh astronaut-pi 'git -C astronaut-streamer log -1'`
+      shows your commit.
+- [ ] **E.5** Throughput: install `iperf3` on both. Run `iperf3 -s` on the
       Jetson and `iperf3 -c 10.42.0.1 -t 10` on the Pi. You want at least 3×
       the stream bitrate (≥ 6 Mbit/s for the default 2 Mbit/s).
 

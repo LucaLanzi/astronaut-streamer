@@ -329,6 +329,22 @@ concerned, then:
 - **Hotspot** (SSID, password, channel): `sudo bash jetson/hotspot.sh up` on
   the Jetson, then `make pi` on the Pi.
 
+**Updating the Pi's code** (it has no internet on the hotspot, and you may be
+out of Ethernet ports): from the laptop, in your astronaut-streamer checkout,
+
+```bash
+make push-pi
+```
+
+It pushes your current commit to the Pi's copy (`~/astronaut-streamer`, on
+branch `main`) over SSH through the Jetson, the same `astronaut-pi` jump as
+above, then restarts the sender. No internet is needed anywhere, and it works
+for commits you haven't pushed to GitHub. It refuses rather than overwrite
+files someone edited on the Pi. `PI_SSH=user@host make push-pi` targets
+another ssh destination. Only committed changes go: commit first. If the
+commit changed an installer or the service file, run `make pi` on the Pi
+afterwards. That needs internet only if new packages are needed.
+
 **Testing without the camera:** `make test-pattern` on the Pi sends colour bars
 and a 440 Hz tone. It pauses the service and starts it again when you press
 Ctrl-C.
@@ -347,6 +363,7 @@ Ctrl-C.
 | `make pi` | Pi | Install or update everything, sender service included |
 | `make probe` | Pi | Full bench check (pauses the sender) |
 | `make test-pattern` | Pi | Colour bars + tone instead of the camera (pauses the sender) |
+| `make push-pi` | laptop | Push the current commit to the Pi through the Jetson and restart the sender |
 | `make status` | either | Services, Wi-Fi/hotspot, and stream state |
 | `make logs` | either | Follow the service logs |
 | `make restart` | either | Restart this machine's services |

@@ -32,6 +32,7 @@ make jetson     # on the Jetson: everything, hotspot included
 make pi         # on the Pi: everything, sender service included
 make probe      # on the Pi: bench check (camera, mic, speaker, encoders, Wi-Fi)
 make status     # on either: what's running
+make push-pi    # on your laptop: send your current commit to the Pi through the Jetson
 ```
 
 From billee-hardware-2027's root, use `make astronaut <command>`.
