@@ -11,7 +11,7 @@ Send live **video + audio** from a USB camera on a **Raspberry Pi 4B**
 (AGX or Nano)** ("rover"). Then:
 
 - the Jetson **serves a web page** on an open port so a **ground station**
-  can open `http://<jetson-ip>:<port>` in a normal browser and watch and
+  can open `http://10.110.0.230:8080` in a normal browser and watch and
   listen. The ground station reaches the Jetson over a point-to-point
   **Ubiquiti Prism** link with a horn antenna on each end. This is how the
   feed is normally used.
@@ -53,7 +53,7 @@ flowchart LR
 
     UBR["Ubiquiti Prism<br/>rover end"]
     UBG["Ubiquiti Prism<br/>ground end"]
-    GS["Ground station browser<br/>http://jetson-eth0-ip:8080"]
+    GS["Ground station browser<br/>http://10.110.0.230:8080"]
 
     FF -- "RTSP push over Wi-Fi" --> AP --> MTX
     SUP -- "HTTP heartbeat (RSSI, temp)" --> WEB
@@ -124,7 +124,7 @@ OBS was considered for the sender. It doesn't fit on the Pi or the Jetson:
 - It only *sends* streams. The Jetson would still need MediaMTX and Flask.
 
 Where it can help: on the **ground-station laptop**, as an optional extra. An
-OBS Media Source on `rtsp://<jetson-eth0-ip>:8554/astronaut` can add overlays,
+OBS Media Source on `rtsp://10.110.0.230:8554/astronaut` can add overlays,
 show the feed next to the rover's other cameras, or restream for outreach,
 with no change to the Pi or the Jetson.
 
@@ -164,8 +164,9 @@ the Jetson.
     wifi-sec.group ccmp wifi-sec.psk '<password>'
   ```
   `ipv4.method shared` runs DHCP for the Pi, so the Jetson is always
-  **10.42.0.1** on this link *(assumed — change it if this subnet clashes with
-  the rover network)*.
+  **10.42.0.1** on this link. `10.42.0.0/24` doesn't overlap the rover
+  network (`10.110.0.x`) unless that network uses a `/8` mask; if it does,
+  move the hotspot to e.g. `192.168.50.0/24` in `astronaut.env`.
 - The hotspot is **its own network, behind NAT on the Jetson**. The Pi can
   make connections out (to the Jetson, and through it), but nothing on the
   Prism side can open a connection to the Pi: the ground station has no route
@@ -191,18 +192,16 @@ the Jetson.
 
 - The Jetson's Ethernet port (`eth0`) plugs into the rover-end Prism; the
   ground-station laptop plugs into the ground-end Prism.
-- Give the Jetson a **static IP on `eth0`** so the ground station can
-  bookmark `http://<jetson-eth0-ip>:8080`. The Flask app also prints the URL
-  at startup.
-- Run the radios in **bridge mode** (airMAX "Bridge" network mode). The
-  laptop and the Jetson are then on one subnet with no NAT, and WebRTC
-  connects directly with no extra settings. If the radios run in router mode
-  instead, add the Jetson's outside address to `webrtcAdditionalHosts`
-  *(R1)*.
-- Bandwidth: each ground-station viewer pulls ~2 Mbps over the link,
-  alongside ROS2 and whatever else the rover sends. A Prism link has far
-  more capacity than that at short range; Phase 6 checks it at competition
-  distance.
+- The Jetson's `eth0` has the fixed IP **`10.110.0.230`** *(decided)*. The
+  ground station bookmarks **`http://10.110.0.230:8080`**; the Flask app also
+  prints the URL at startup.
+- The ground station is on the same network as the Jetson through the Prism
+  link (radios bridging, no NAT) *(decided)*, so WebRTC connects directly
+  with no extra settings.
+- Bandwidth: only the ground station watches *(decided)*, so the feed adds
+  ~2 Mbps to the Prism link, alongside ROS2 and whatever else the rover sends.
+  A Prism link has far more capacity than that at short range; Phase 6 checks
+  it at competition distance.
 - **Keep ROS2 DDS traffic off the hotspot.** By default DDS uses every
   interface, and Wi-Fi sends multicast at its slowest rate, so DDS discovery
   traffic can use up the astronaut link's airtime. Limit DDS to `eth0` (or
@@ -215,7 +214,7 @@ firewall changes are needed. On the ground-station laptop, `~/.ssh/config`:
 
 ```
 Host jetson
-    HostName <jetson-eth0-ip>
+    HostName 10.110.0.230
     User <jetson-user>
 
 Host astronaut-pi
@@ -321,7 +320,7 @@ ffmpeg -hide_banner -loglevel warning \
   rtmp: no
   srt: yes                          # optional low-latency transport for lossy Wi-Fi
   webrtcIPsFromInterfacesList: [eth0, wlan0]   # skip docker/virtual interfaces
-  webrtcAdditionalHosts: []         # only needed if the Prism radios do NAT (R1)
+  webrtcAdditionalHosts: []         # not needed: ground station is on the Jetson's subnet
   paths:
     astronaut:
       source: publisher
@@ -426,13 +425,13 @@ README's repository layout gets an entry.
 
 | Phase | Work | Exit criteria |
 |---|---|---|
-| **0 — Bench check** | On the Pi: `v4l2-ctl --list-devices / --list-formats-ext`, `arecord -l`, record 5 s through ALSA **while logged into the desktop** (catches PulseAudio "device busy"), test `h264_v4l2m2m`. On the Jetson: `cat /etc/nv_tegra_release`, `iw list` shows AP. Bring the hotspot up, join it from the Pi, run `iperf3` at 5 / 20 / 50 m and through obstacles. Prism link: confirm bridge mode, ping the Jetson's `eth0` IP from the ground laptop, then `ssh astronaut-pi` through the Jetson. | Table of camera modes; HW-encoder yes/no; mic opens with the desktop running; measured Wi-Fi throughput vs distance; ground laptop reaches the Jetson and the Pi |
+| **0 — Bench check** | On the Pi: `v4l2-ctl --list-devices / --list-formats-ext`, `arecord -l`, record 5 s through ALSA **while logged into the desktop** (catches PulseAudio "device busy"), test `h264_v4l2m2m`. On the Jetson: `cat /etc/nv_tegra_release`, `iw list` shows AP. Bring the hotspot up, join it from the Pi, run `iperf3` at 5 / 20 / 50 m and through obstacles. Prism link: ping `10.110.0.230` from the ground laptop, then `ssh astronaut-pi` through the Jetson. | Table of camera modes; HW-encoder yes/no; mic opens with the desktop running; measured Wi-Fi throughput vs distance; ground laptop reaches the Jetson and the Pi |
 | **1 — Media server + test pattern** | Install MediaMTX; from the Pi, push `ffmpeg -re -f lavfi -i testsrc … -f lavfi -i sine …`; open `http://10.42.0.1:8889/astronaut` on a laptop on the hotspot | Test pattern + tone play in the browser |
 | **2 — Real camera, manual command** | Run the command from §3.2 by hand; tune resolution/bitrate; measure Pi CPU/temp, **latency** (film a stopwatch next to the viewer), **sync** (clap test) | A2, A3, A6 met at the chosen resolution |
 | **3 — `sender.py` + systemd** | Discovery, wait-for-Jetson, backoff restart, video-only fallback, heartbeat, test-pattern mode, unit tests | Unplug/replug camera, kill Wi-Fi, reboot each box in either order → A4, A5 |
 | **4 — Flask web applet** | Dashboard, `/api/status`, heartbeat endpoint, click-to-start audio; iframe player first, then WHEP player + HLS fallback | A1 from a laptop on the hotspot **and** from the ground station over the Prism link |
 | **5 — Bench viewer** | `local_view.sh` (ffplay), Makefile targets | Feed visible + audible on the Jetson with a monitor + headset plugged in |
-| **6 — Field soak** | 2 h continuous run; walk out of hotspot range and back; drop and restore the Prism link; 3+ simultaneous viewers; Prism link at competition distance alongside normal rover traffic (ROS2, GDS) | All acceptance criteria hold in the field |
+| **6 — Field soak** | 2 h continuous run; walk out of hotspot range and back; drop and restore the Prism link; ground-station page left open the whole run; Prism link at competition distance alongside normal rover traffic (ROS2, GDS) | All acceptance criteria hold in the field |
 | **7 — Docs** | `README.md`, troubleshooting, top-level README + Makefile | Someone new can set it up from the README alone |
 
 ## 7. Failure modes and planned behaviour
@@ -450,7 +449,7 @@ README's repository layout gets an entry.
 | Ground station opens page before stream exists | Player waits and connects when the stream appears |
 | Browser blocks autoplay with sound | **▶ Start** button; video can start muted, audio after one click |
 | Ground network blocks UDP / NAT in between | Set `webrtcAdditionalHosts`, or the page falls back to **HLS** (TCP only, ~2–4 s latency) |
-| Many viewers | MediaMTX copies packets without re-encoding; each viewer adds ~2 Mbps on the Prism link (see R3) |
+| A second viewer opens the page | Still works: MediaMTX copies packets without re-encoding, each viewer adds ~2 Mbps on the Prism link. Normal use is the ground station only *(decided)* |
 | Hotspot subnet clashes with rover network | `10.42.0.0/24` is configurable in `astronaut.env` |
 | Port already in use on the Jetson | All ports configurable; defaults avoid GDS 5000/5001 and VNC 5900 |
 | No internet in the field | Installers need internet once; MediaMTX binary can be vendored; Pi needs no pip packages |
@@ -483,21 +482,17 @@ Answered 2026-11-04.
 | D8 | Recording | **None**; view only, at the ground station, forwarded by the Jetson |
 | D9 | Pi image | **Ubuntu 22.04 Desktop** |
 | D10 | Reaching the Pi from the ground | **SSH into the Jetson, then to the Pi over the hotspot** (`ProxyJump`); the Pi stays behind the Jetson's NAT |
+| D11 | Jetson address on the Prism network | **`10.110.0.230`** (fixed); ground station is on the same network through the Prism link |
+| D12 | Viewers and password | **Ground station only, no password** |
+| D13 | Pi power | **Portable battery pack**; out of scope for this plan |
 
 ## 10. Remaining questions
 
 Smaller ones; the plan works with the defaults.
 
-- **R1 — Prism addressing:** are the radios in **bridge** mode, and what
-  static IP/subnet should the Jetson's `eth0` have on the rover network?
-  *Default: bridge mode; Jetson IP picked to fit the existing rover subnet.*
 - **R2 — Prism band:** is the Prism link on 5 GHz? If it's on 2.4 GHz, the
   hotspot should move to 5 GHz instead. *Default: 5 GHz, hotspot stays on
   2.4 GHz.*
-- **R3 — Viewers and password:** how many people watch at once, and should
-  the page need a password? *Default: ≤ 3 viewers, no password.*
-- **R4 — Pi power and housing:** battery? Inside a suit or enclosure (heat)?
-  *Default: 5 V / 3 A supply, open air.*
 - **R5 — Repo:** folder in this repo, or a separate `astronaut-streamer` repo
   pulled in as a submodule? *Default: folder in this repo.*
 - **R6 — Mic failure:** keep sending video only, or treat it as a fault?
