@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/../config/config.sh"
 require_root
 
-for unit in astronaut-sender astronaut-web astronaut-mediamtx; do
+for unit in astronaut-talkback astronaut-sender astronaut-web astronaut-mediamtx; do
   if [ -f "/etc/systemd/system/$unit.service" ]; then
     systemctl disable --now "$unit" >/dev/null 2>&1 || true
     rm -f "/etc/systemd/system/$unit.service"

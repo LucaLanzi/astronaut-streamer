@@ -54,10 +54,11 @@ class ShellConfigTests(unittest.TestCase):
         # MoQ writes into the working folder and hangs on shutdown (MediaMTX 1.21.3).
         self.assertIn("\nmoq: false\n", yml)
         self.assertIn("  astronaut:\n    source: publisher", yml)
+        self.assertIn("  talkback:\n", yml)
 
     def test_units_render(self):
         for template in ("jetson/astronaut-mediamtx.service.in", "jetson/astronaut-web.service.in",
-                         "pi/astronaut-sender.service.in"):
+                         "pi/astronaut-sender.service.in", "pi/astronaut-talkback.service.in"):
             out = self.render(template, "SERVICE_USER=astro;")
             self.assertEqual(out.returncode, 0, f"{template}: {out.stderr}")
             self.assertNotRegex(out.stdout, r"@[A-Z_][A-Z0-9_]*@", template)
@@ -119,6 +120,92 @@ class ShellConfigTests(unittest.TestCase):
         self.assertIn("apt-get update", out.stdout)
         self.assertIn("apt-get install -y iw", out.stdout)
         self.assertNotIn("install -y ffmpeg", out.stdout)
+
+    # ------------------------------------------------ make ... ip <role> <addr>
+    def set_ips(self, *args):
+        local_env = Path(tempfile.mkdtemp()) / "local.env"
+        self.addCleanup(shutil.rmtree, local_env.parent)
+        out = subprocess.run(["bash", str(ROOT / "tools/set_ips.sh"), *args], capture_output=True,
+                             text=True, env={**os.environ, "ASTRO_LOCAL_ENV": str(local_env)})
+        saved = local_env.read_text() if local_env.exists() else ""
+        return out, envconfig.parse_env(saved)
+
+    def test_set_jetson_addresses(self):
+        out, saved = self.set_ips("jetson", "ip", "rover", "192.168.4.97/22", "ip", "hotspot", "192.168.50.1")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(saved, {"JETSON_GROUND_IP": "192.168.4.97", "JETSON_GROUND_PREFIX": "22",
+                                 "JETSON_HOTSPOT_IP": "192.168.50.1"})
+        self.assertIn("192.168.4.97/22", out.stdout)
+        self.assertIn("isn't in the hotspot's subnet", out.stderr, "the Pi default no longer matches")
+
+    def test_set_pi_addresses(self):
+        out, saved = self.set_ips("pi", "ip", "jetson", "192.168.50.1", "ip", "192.168.50.2")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(saved, {"JETSON_HOTSPOT_IP": "192.168.50.1", "PI_HOTSPOT_IP": "192.168.50.2"})
+        self.assertNotIn("subnet", out.stderr)
+
+    def test_no_arguments_keeps_the_rover_defaults(self):
+        out, saved = self.set_ips("jetson")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(saved, {})
+        self.assertIn("10.110.0.230/24", out.stdout)
+        self.assertIn("10.42.0.1/24", out.stdout)
+
+    def test_bad_addresses_are_refused(self):
+        for args in (["jetson", "ip", "rover", "192.168.4.999"], ["jetson", "ip", "bogus", "1.2.3.4"],
+                     ["pi", "ip"], ["jetson", "rover", "1.2.3.4"], ["pi", "ip", "10.42.0.1"]):
+            out, _ = self.set_ips(*args)
+            self.assertNotEqual(out.returncode, 0, args)
+
+    # ------------------------------------------- ensure_ground_address (Jetson)
+    def fake_network(self, addresses, answering=()):
+        """PATH dir with fake ip/ping/nmcli; nmcli logs what it's asked to change."""
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        log = d / "nmcli.log"
+        lines = "\n".join(f"2: {dev}    inet {addr} brd 0.0.0.0 scope global" for dev, addr in addresses)
+        (d / "ip").write_text(f"#!/bin/sh\nprintf '%s\\n' '{lines}'\n")
+        (d / "ping").write_text("#!/bin/sh\nfor a in " + " ".join(answering or ["none"]) +
+                                '; do [ "${@: -1}" = "$a" ] && exit 0; done; exit 1\n'.replace("${@: -1}", "$5"))
+        (d / "nmcli").write_text(f"""#!/bin/sh
+echo "$*" >> {log}
+case "$*" in
+  "-t -f DEVICE,TYPE,STATE device") printf 'enP8p1s0:ethernet:connected\\nwlP1p1s0:wifi:connected\\n' ;;
+  "-g GENERAL.CONNECTION device show enP8p1s0") echo "Wired connection 1" ;;
+  "-g ipv4.method connection show Wired connection 1") echo auto ;;
+esac
+""")
+        for f in ("ip", "ping", "nmcli"):
+            (d / f).chmod(0o755)
+        return {"PATH": f"{d}:{os.environ['PATH']}", "ASTRO_SETTLE_S": "0"}, log
+
+    def ensure(self, env, ip="10.110.0.230", prefix="24"):
+        return bash(f"set -euo pipefail; report_errors; ensure_ground_address {ip} {prefix} ''", env)
+
+    def test_ground_address_added_next_to_the_existing_one(self):
+        env, log = self.fake_network([("enP8p1s0", "192.168.4.97/22")])
+        out = self.ensure(env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        calls = log.read_text()
+        self.assertIn("connection modify Wired connection 1 +ipv4.addresses 10.110.0.230/24", calls)
+        self.assertIn("ipv4.dhcp-timeout infinity", calls)
+        self.assertIn("device reapply enP8p1s0", calls)
+        self.assertNotIn("-ipv4", calls, "never removes an address")
+        self.assertNotIn("connection up", calls, "never re-activates (that would drop SSH)")
+
+    def test_ground_address_already_there(self):
+        env, log = self.fake_network([("enP8p1s0", "10.110.0.230/24")])
+        out = self.ensure(env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("already on enP8p1s0", out.stdout)
+        self.assertFalse(log.exists() and "modify" in log.read_text())
+
+    def test_ground_address_taken_by_another_device(self):
+        env, log = self.fake_network([("enP8p1s0", "192.168.4.97/22")], answering=["192.168.4.96"])
+        out = self.ensure(env, ip="192.168.4.96", prefix="22")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("another device already answers on 192.168.4.96", out.stderr)
+        self.assertFalse(log.exists() and "modify" in log.read_text())
 
     def test_ampersand_stays_literal(self):
         out = bash('X="a&b"; t=$(mktemp); printf "v=@X@\\n" > "$t"; '

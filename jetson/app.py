@@ -1,23 +1,34 @@
 #!/usr/bin/env python3
-"""Ground-station dashboard on the Jetson (PLAN.md §3.4).
+"""Ground-station dashboard on the Jetson (PLAN.md §3.4, §3.6).
 
-Serves the page the ground station opens at http://<jetson>:8080. The page
-plays the feed straight from MediaMTX (WebRTC, with an HLS fallback); this
-app only serves the page, reports stream status from MediaMTX's API, and
-collects the Pi's health heartbeats.
+Serves the page the ground station opens. The page plays the astronaut feed
+from MediaMTX (WebRTC, with an HLS fallback) and, on the HTTPS port, sends the
+ground station's microphone to the Pi (talk-back). All of the browser's
+requests come here: WebRTC set-up and HLS are passed on to MediaMTX, so an
+HTTPS page never makes an insecure request. Only the WebRTC media itself (UDP)
+flows straight between the browser and MediaMTX.
 
-    GET  /               dashboard
-    GET  /api/status     stream + Pi status (JSON)
-    POST /api/heartbeat  the Pi's sender posts its health here every 2 s
-    GET  /healthz        "ok" (for checks and monitoring)
+    GET  /                       dashboard
+    GET  /api/status             stream, talk-back and Pi status (JSON)
+    GET  /api/talkback           {"live", "listeners"}: the Pi's talk-back player polls this
+    POST /api/heartbeat          the Pi's sender posts its health here every 2 s
+    POST /webrtc/<path>/whep     start watching a stream (passed to MediaMTX)
+    POST /webrtc/<path>/whip     start publishing talk-back (passed to MediaMTX)
+    GET  /hls/<path>/...         MediaMTX's HLS player and playlists (passed on)
+    GET  /tls.crt                the dashboard's self-signed certificate
+    GET  /healthz                "ok"
 
-Runs on Flask 2.0+ (Ubuntu 22.04's python3-flask) served by waitress.
+The same app is served over HTTP on WEB_PORT (waitress: viewing, and the Pi)
+and over HTTPS on WEB_TLS_PORT (cheroot: viewing + talk-back, because browsers
+only allow the microphone on HTTPS pages). Runs on Ubuntu 22.04's Flask 2.0.1,
+waitress 1.4.4 and cheroot 8.5.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -26,7 +37,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, abort, jsonify, render_template, request, send_file
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "common"))
@@ -35,7 +46,8 @@ from envconfig import get_int, load_config  # noqa: E402
 log = logging.getLogger("astronaut-web")
 
 HEARTBEAT_STALE_S = 6.0     # Pi heartbeats come every 2 s
-MAX_HEARTBEAT_BYTES = 64 * 1024
+MAX_BODY_BYTES = 64 * 1024  # heartbeats and SDP offers are a few kB
+TLS_DIR = Path(os.environ.get("ASTRO_TLS_DIR", "/etc/astronaut-streamer/tls"))
 POLL_MIN_INTERVAL_S = 1.0   # ask MediaMTX at most this often, however many viewers
 
 
@@ -52,6 +64,19 @@ def http_get_json(url: str, timeout: float = 1.0) -> tuple[int, dict | None]:
         return exc.code, body
     except (OSError, ValueError):
         return 0, None
+
+
+def upstream(method: str, url: str, body: bytes | None = None,
+             headers: dict | None = None, timeout: float = 10.0) -> tuple[int, dict, bytes]:
+    """Pass a request on to MediaMTX: (status, headers, body). 502 if it's down."""
+    req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, dict(resp.headers), resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, dict(exc.headers), exc.read()
+    except OSError as exc:
+        return 502, {"Content-Type": "text/plain"}, f"media server unreachable: {exc}\n".encode()
 
 
 VIDEO_CODECS = {"H264", "H265", "AV1", "VP8", "VP9", "M-JPEG", "MPEG-4 Video", "MPEG-1/2 Video"}
@@ -151,47 +176,100 @@ class HeartbeatStore:
 
 
 def page_config(cfg: dict) -> dict:
-    """What the page's JavaScript needs to find MediaMTX."""
+    """What the page's JavaScript needs."""
     return {
         "path": cfg.get("STREAM_PATH") or "astronaut",
-        "webrtcPort": get_int(cfg, "WEBRTC_PORT", 8889),
-        "hlsPort": get_int(cfg, "HLS_PORT", 8888),
+        "talkbackPath": cfg.get("TALKBACK_PATH") or "talkback",
+        "tlsPort": get_int(cfg, "WEB_TLS_PORT", 8443),
     }
 
 
 def create_app(cfg: dict, monitor: FeedMonitor | None = None,
-               heartbeats: HeartbeatStore | None = None) -> Flask:
+               heartbeats: HeartbeatStore | None = None,
+               talkback: FeedMonitor | None = None, fetch=upstream) -> Flask:
     app = Flask(__name__)
-    app.config["MAX_CONTENT_LENGTH"] = MAX_HEARTBEAT_BYTES
+    app.config["MAX_CONTENT_LENGTH"] = MAX_BODY_BYTES
     path = cfg.get("STREAM_PATH") or "astronaut"
-    monitor = monitor or FeedMonitor(
-        f"http://127.0.0.1:{get_int(cfg, 'MEDIAMTX_API_PORT', 9997)}", path)
+    talkback_path = cfg.get("TALKBACK_PATH") or "talkback"
+    api = f"http://127.0.0.1:{get_int(cfg, 'MEDIAMTX_API_PORT', 9997)}"
+    webrtc = f"http://127.0.0.1:{get_int(cfg, 'WEBRTC_PORT', 8889)}"
+    hls = f"http://127.0.0.1:{get_int(cfg, 'HLS_PORT', 8888)}"
+    monitor = monitor or FeedMonitor(api, path)
+    talkback = talkback or FeedMonitor(api, talkback_path)
     heartbeats = heartbeats or HeartbeatStore()
     # </script> can't appear inside the inline JSON block.
     config_json = json.dumps(page_config(cfg)).replace("</", "<\\/")
+
+    @app.before_request
+    def limit_body():
+        # Also checked here: Flask 2.0 (Ubuntu 22.04) doesn't apply
+        # MAX_CONTENT_LENGTH to every kind of body.
+        if (request.content_length or 0) > MAX_BODY_BYTES:
+            return jsonify({"error": "request too large"}), 413
+        return None
 
     @app.route("/")
     def index():
         return render_template("index.html", page_config=config_json)
 
+    def talkback_state() -> dict:
+        st = talkback.status()
+        # A reader of the talk-back stream is the Pi's player.
+        return {"live": st["live"], "listeners": st.get("viewers", 0) if st["live"] else 0,
+                "mediamtx": st["mediamtx"]}
+
     @app.route("/api/status")
     def api_status():
-        resp = jsonify({"feed": monitor.status(), "pi": heartbeats.snapshot(),
-                        "stream_path": path, "time": time.time()})
+        resp = jsonify({"feed": monitor.status(), "talkback": talkback_state(),
+                        "pi": heartbeats.snapshot(), "stream_path": path, "time": time.time()})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.route("/api/talkback")
+    def api_talkback():
+        resp = jsonify(talkback_state())
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
     @app.route("/api/heartbeat", methods=["POST"])
     def api_heartbeat():
-        # Checked here too: Flask 2.0 (Ubuntu 22.04) doesn't apply
-        # MAX_CONTENT_LENGTH to JSON bodies.
-        if (request.content_length or 0) > MAX_HEARTBEAT_BYTES:
-            return jsonify({"error": "heartbeat too large"}), 413
         data = request.get_json(silent=True)
         if not isinstance(data, dict):
             return jsonify({"error": "expected a JSON object"}), 400
         heartbeats.update(data, request.remote_addr)
         return jsonify({"ok": True})
+
+    @app.route("/webrtc/<name>/<kind>", methods=["POST"])
+    def webrtc_signal(name, kind):
+        # Only watching the feed and publishing talk-back.
+        if (name, kind) not in {(path, "whep"), (talkback_path, "whip")}:
+            abort(404)
+        status, headers, body = fetch(
+            "POST", f"{webrtc}/{name}/{kind}", request.get_data(),
+            {"Content-Type": request.content_type or "application/sdp"})
+        return Response(body, status=status,
+                        content_type=headers.get("Content-Type", "application/sdp"))
+
+    @app.route("/hls/<name>/", defaults={"rest": ""})
+    @app.route("/hls/<name>/<path:rest>")
+    def hls_proxy(name, rest):
+        if name != path:
+            abort(404)
+        query = request.query_string.decode()
+        # Low-latency HLS holds playlist requests open until new media exists.
+        status, headers, body = fetch(
+            "GET", f"{hls}/{name}/{rest}" + (f"?{query}" if query else ""), timeout=20)
+        resp = Response(body, status=status, content_type=headers.get("Content-Type"))
+        if "Cache-Control" in headers:
+            resp.headers["Cache-Control"] = headers["Cache-Control"]
+        return resp
+
+    @app.route("/tls.crt")
+    def tls_cert():
+        cert = TLS_DIR / "dashboard.crt"
+        if not cert.is_file():
+            abort(404)
+        return send_file(str(cert), mimetype="application/x-x509-ca-cert")
 
     @app.route("/healthz")
     def healthz():
@@ -215,16 +293,38 @@ def ipv4_addresses() -> list[tuple[str, str]]:
     return result
 
 
+def serve_https(app: Flask, port: int) -> bool:
+    """Serve the app over HTTPS in a background thread. False if it can't
+    (no certificate, or cheroot missing): HTTP still works, without talk-back."""
+    cert, key = TLS_DIR / "dashboard.crt", TLS_DIR / "dashboard.key"
+    if not (cert.is_file() and key.is_file()):
+        log.warning("no certificate in %s: HTTPS (talk-back) is off; re-run the installer", TLS_DIR)
+        return False
+    try:
+        from cheroot import wsgi
+        from cheroot.ssl.builtin import BuiltinSSLAdapter
+    except ImportError:
+        log.warning("cheroot isn't installed: HTTPS (talk-back) is off (sudo apt install python3-cheroot)")
+        return False
+    server = wsgi.Server(("0.0.0.0", port), app, numthreads=16, server_name="astronaut-streamer")
+    server.ssl_adapter = BuiltinSSLAdapter(str(cert), str(key))
+    threading.Thread(target=server.start, name="https", daemon=True).start()
+    return True
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     cfg = load_config()
     port = get_int(cfg, "WEB_PORT", 8080)
+    tls_port = get_int(cfg, "WEB_TLS_PORT", 8443)
     app = create_app(cfg)
+    https = serve_https(app, tls_port)
     for iface, addr in ipv4_addresses():
         note = "  <- ground station" if addr == cfg.get("JETSON_GROUND_IP") else ""
-        log.info("dashboard: http://%s:%d  (%s)%s", addr, port, iface, note)
+        log.info("dashboard: http://%s:%d%s  (%s)%s", addr, port,
+                 f"  talk-back: https://{addr}:{tls_port}" if https else "", iface, note)
     from waitress import serve
-    serve(app, host="0.0.0.0", port=port, threads=8, ident="astronaut-streamer")
+    serve(app, host="0.0.0.0", port=port, threads=16, ident="astronaut-streamer")
     return 0
 
 

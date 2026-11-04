@@ -40,11 +40,12 @@ def parse_env(text: str) -> dict[str, str]:
 
 
 def load_config(config_dir: Path = CONFIG_DIR) -> dict[str, str]:
-    """astronaut.env, overridden by astronaut.local.env, overridden by any
-    environment variable of the same name (`VIDEO_WIDTH=640 ./probe_devices.py`)."""
+    """astronaut.env, overridden by astronaut.local.env (or the file named by
+    $ASTRO_LOCAL_ENV), overridden by any environment variable of the same name
+    (`VIDEO_WIDTH=640 ./probe_devices.py`)."""
     values: dict[str, str] = {}
-    for name in ("astronaut.env", "astronaut.local.env"):
-        path = Path(config_dir) / name
+    local = os.environ.get("ASTRO_LOCAL_ENV") or str(Path(config_dir) / "astronaut.local.env")
+    for path in (Path(config_dir) / "astronaut.env", Path(local)):
         if path.is_file():
             values.update(parse_env(path.read_text()))
     for key in values:

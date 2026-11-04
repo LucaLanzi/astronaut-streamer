@@ -26,9 +26,10 @@ The targets come from [PLAN.md §1](../PLAN.md#acceptance-criteria-proposed):
 - [ ] **A.1** `make test` → ends with `OK`.
 - [ ] **A.2** `make lint` → `shellcheck: clean` and `python: compiles`
       (install shellcheck first: `sudo apt install shellcheck`).
-- [ ] **A.3** `make e2e` → ends with `21/21 checks passed`: real MediaMTX,
-      dashboard, test-pattern sender, and headless Chrome playing WebRTC
-      video and audio, including recovery from killed processes.
+- [ ] **A.3** `make e2e` → ends with `N/N checks passed`: real MediaMTX,
+      dashboard over HTTP and HTTPS, test-pattern sender, headless Chrome
+      playing WebRTC video and audio, talk-back from Chrome's fake microphone
+      to the real `talkback.py`, and recovery from killed processes.
 
 ## B. Jetson install
 
@@ -44,7 +45,11 @@ The targets come from [PLAN.md §1](../PLAN.md#acceptance-criteria-proposed):
 - [ ] **B.5** `make status` → `astronaut-mediamtx active`,
       `astronaut-web active`, `Hotspot: UP`.
 - [ ] **B.6** Run `make jetson` again → it completes again and says
-      `MediaMTX v1.21.3 is already installed` (safe to re-run).
+      `MediaMTX v1.21.3 is already installed` and `Packages already
+      installed` (safe to re-run, works offline).
+- [ ] **B.6a** Addresses from the make line: `make jetson ip rover <home-addr>/<mask>`
+      → `make ip` shows it, and SSH stayed up. `make ip reset` → back to
+      `10.110.0.230` / `10.42.0.1` / `10.42.0.2`.
 - [ ] **B.7** Reboot the Jetson, touch nothing → `make status` shows the same
       as B.5 (A5).
 - [ ] **B.8** Anything else on the Jetson still works: F´ GDS (ports
@@ -64,10 +69,10 @@ The targets come from [PLAN.md §1](../PLAN.md#acceptance-criteria-proposed):
       lab Wi-Fi, Wi-Fi country, SSH on (SETUP.md §6).
 - [ ] **D.2** `make pi` ends with `Done.` and said
       `astronaut-sender is running`.
-- [ ] **D.3** With the camera and the USB speaker both plugged in, `make probe`
-      ends with `0 problem(s)`. The mic line says
-      `same USB device as the camera`, the speaker line names the USB
-      speaker, and you **heard** the beep.
+- [ ] **D.3** With the camera and the headphones (3.5 mm jack) plugged in,
+      `make probe` ends with `0 problem(s)`. The mic line says
+      `same USB device as the camera`, the talk-back output line says
+      `[Headphones]`, and you **heard** the beep in the headphones.
 - [ ] **D.4** Run `make probe` again **on the battery pack** → no throttle
       flags (in particular no under-voltage).
 
@@ -129,6 +134,18 @@ The targets come from [PLAN.md §1](../PLAN.md#acceptance-criteria-proposed):
       first keeps playing.
 - [ ] **G.8** *(optional, needs a monitor and headset on the Jetson)*
       `make view` plays with sound.
+- [ ] **G.9** Talk-back: open `https://<jetson>:8443`, accept the certificate.
+      Pick a microphone, turn **Talk-back** on → *"Live: the astronaut hears
+      you"*, and the astronaut hears you in the headphones.
+- [ ] **G.10** Talk-back delay: say "now" while watching a stopwatch on the
+      video; note when the astronaut hears it. Target < 1 s.
+- [ ] **G.11** **Mute** silences you at once, holding **Space** while muted
+      talks, and switching microphones in the dropdown while live works.
+- [ ] **G.12** Echo: with talk-back on and the dashboard's audio on, you
+      don't hear yourself come back (headphones on the Pi, headset or
+      echo cancellation on the ground).
+- [ ] **G.13** The plain `http://…:8080` page shows the link to the secure
+      page instead of talk-back controls.
 
 | Latency reading | 1 | 2 | 3 |
 |---|---|---|---|
@@ -156,6 +173,9 @@ until the picture is back.
 | H.12 | On the Jetson: `sudo systemctl restart astronaut-mediamtx` | SERVER DOWN briefly, then LIVE | | [ ] |
 | H.13 | On the Jetson: `sudo systemctl restart astronaut-web` | The page recovers by itself | | [ ] |
 | H.14 | Close the browser tab and open the dashboard again | Plays; one click for audio | | [ ] |
+| H.15 | While talking back, unplug the headphones and plug them in again | Talk-back resumes; the video stream is unaffected | | [ ] |
+| H.16 | While talking back, close the ground-station tab | Talk-back stops on the Pi within ~5 s | | [ ] |
+| H.17 | On the Pi: `sudo systemctl restart astronaut-talkback` while talking | Picks talk-back up again within a few seconds | | [ ] |
 
 ## I. Rover integration
 

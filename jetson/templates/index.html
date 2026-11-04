@@ -14,6 +14,7 @@
       <span id="badge-feed" class="badge">…</span>
       <span id="badge-audio" class="badge warn" hidden>NO AUDIO</span>
       <span id="badge-pi" class="badge warn" hidden>PI SILENT</span>
+      <span id="badge-talk" class="badge talk" hidden>TALKING</span>
     </div>
   </header>
 
@@ -30,6 +31,26 @@
         <button id="btn-hls" type="button">Compatibility (HLS)</button>
         <button id="btn-fullscreen" type="button">Fullscreen</button>
       </div>
+
+      <section class="panel talkback">
+        <h2>Talk-back to the astronaut</h2>
+        <p id="tb-insecure" class="note" hidden>
+          Browsers only allow the microphone on secure pages. Open
+          <a id="tb-secure-link" href="#">the secure dashboard</a>
+          and accept the certificate warning once (the certificate is the Jetson's own).
+        </p>
+        <div id="tb-controls" hidden>
+          <label class="field">Microphone
+            <select id="tb-mic"><option value="">Default microphone</option></select>
+          </label>
+          <div class="tb-row">
+            <button id="tb-start" type="button" class="primary">🎙 Talk-back: OFF</button>
+            <button id="tb-mute" type="button" hidden>Mute</button>
+            <div class="meter" title="Microphone level"><div id="tb-level"></div></div>
+          </div>
+          <p id="tb-status" class="note"></p>
+        </div>
+      </section>
     </section>
 
     <aside class="panels">

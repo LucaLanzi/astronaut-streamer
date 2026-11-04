@@ -1,6 +1,9 @@
 # astronaut-streamer — Implementation Plan
 
-> **Status:** all software for phases 0-5 is written and passes its tests:
+> **Status:** confirmed on hardware: video and audio from the Pi play at the
+> ground station. Talk-back (ground → Pi headphones) and make-line address
+> overrides are added and pass the tests below. All software for phases 0-5
+> is written and passes its tests:
 > unit tests, plus `make e2e`, which runs the real pipeline on a laptop and
 > checks it in headless Chrome. What's left is the hardware testing in
 > [docs/TEST_CHECKLIST.md](docs/TEST_CHECKLIST.md), which covers phases 0-6.
@@ -379,11 +382,13 @@ enough.
 - Not installed as a service: normal use is through the ground station.
   Plug a monitor and headset into the Jetson when bench testing.
 
-### 3.6 USB speaker on the Pi
+### 3.6 Talk-back (ground station → Pi headphones)
 
-The Pi also has a **USB speaker** *(decided)*. The stream stays one-way for
-now (D4), so the speaker isn't used yet. What's already handled, and what
-talk-back from the ground would add:
+*Implemented* (D4, D17, D18): `jetson/static/player.js` (toggle, mic picker,
+mute, hold-Space push-to-talk), `/webrtc/talkback/whip` in `jetson/app.py`,
+the `talkback` path in `jetson/mediamtx.yml.in`, and `pi/talkback.py`
+(service `astronaut-talkback`). HTTPS is served by the dashboard itself
+(cheroot, self-signed certificate made by the installer). The original notes:
 
 - **Already handled:** the stream's mic is matched to the camera's USB
   device (§3.2), so the speaker, or a speakerphone with its own mic, never
@@ -526,7 +531,7 @@ Answered 2026-11-04.
 | D1 | How does the ground station reach the Jetson? | Point-to-point **Ubiquiti Prism** link, horn antenna on each end |
 | D2 | Which Jetson / JetPack? | **Orin on JetPack 6** (Ubuntu 22.04); AGX or Nano both work with this design |
 | D3 | Is the Jetson's Wi-Fi free to be the hotspot? | **Yes**, `wlan0` is only for the astronaut link |
-| D4 | One-way or two-way audio? | **One-way** (astronaut → ground) |
+| D4 | One-way or two-way audio? | **Two-way** (was one-way): the Pi's camera mic is always on; the ground station talks back with an on/off toggle and a microphone picker, heard in headphones on the Pi's 3.5 mm jack (§3.6) |
 | D5 | Range / band | Default accepted: < 50 m, line of sight, **2.4 GHz ch 6** |
 | D6 | Resolution / frame rate | Default accepted: **720p @ 30 fps, ~2 Mbps**; drop to 480p if the Pi can't keep up |
 | D7 | Local viewing on the Jetson | **Bench testing only**; normal use is through the ground station |
@@ -539,7 +544,9 @@ Answered 2026-11-04.
 | D14 | Prism band | **Doesn't matter**: airMAX isn't visible to normal Wi-Fi; the hotspot stays on 2.4 GHz |
 | D15 | Repo | **`LucaLanzi/astronaut-streamer`**, a submodule of billee-hardware-2027 on `lucadev` |
 | D16 | Mic fails | **Keep sending video only**, flagged on the dashboard |
-| D17 | Pi speaker | **USB speaker on the Pi**; reserved for now, audio stays one-way (§3.6) |
+| D17 | Pi audio out | **Headphones on the 3.5 mm jack** for talk-back (a USB speaker/headset works too via `TALKBACK_MATCH`) |
+| D18 | Talk-back transport | Browser mic → WHIP → MediaMTX path `talkback` → `pi/talkback.py` (ffmpeg → aplay). The dashboard also serves HTTPS (self-signed, port 8443) because browsers only allow the mic there, and proxies WebRTC set-up and HLS so the HTTPS page makes no insecure requests |
+| D19 | Addresses | Rover defaults; overridable from make: `make jetson ip rover/hotspot <addr>`, `make pi ip [jetson] <addr>`, saved per machine; the Jetson installer adds its ground-side address to the Ethernet itself, never removing one |
 
 ## 10. Remaining questions
 
@@ -547,6 +554,4 @@ Smaller ones; the plan works with the defaults.
 
 - **R7 — More cameras later?** *Default: one; MediaMTX paths are named so more
   can be added (`/astronaut2`).*
-- **R8 — What is the Pi's speaker for?** Hearing the ground station
-  (talk-back), or sounds made on the Pi (alerts, tones)? *Default: reserved;
-  no talk-back until it's asked for.*
+- ~~R8 — What is the Pi's speaker for?~~ Answered: talk-back, on headphones (D17).

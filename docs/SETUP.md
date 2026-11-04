@@ -6,18 +6,21 @@ ground station over the Ubiquiti Prism link.
 
 ```
  USB camera + mic          Wi-Fi hotspot "ASTRO-LINK"            Prism point-to-point
- USB speaker                  2.4 GHz, WPA2                         link (bridged)
+ headphones (3.5 mm)          2.4 GHz, WPA2                         link (bridged)
       │                                                                    │
-┌─────┴──────────┐  RTSP   ┌───────────────────────────┐   WebRTC   ┌──────┴──────────┐
-│ Raspberry Pi 4B│ ──────► │ Jetson Orin (JetPack 6)   │ ─────────► │ Ground-station  │
-│ 10.42.0.2      │ H.264 + │ 10.42.0.1 (hotspot)       │  + HTTP    │ laptop, browser │
-│ sender service │  Opus   │ 10.110.0.230 (Prism side) │            │ 10.110.0.x      │
-└────────────────┘         │ MediaMTX + dashboard :8080│            └─────────────────┘
-                           └───────────────────────────┘
+┌─────┴──────────┐  video +  ┌───────────────────────────┐  WebRTC  ┌──────┴──────────┐
+│ Raspberry Pi 4B│  mic ───► │ Jetson Orin (JetPack 6)   │ ───────► │ Ground-station  │
+│ 10.42.0.2      │ ◄─── talk-│ 10.42.0.1 (hotspot)       │ ◄─────── │ laptop, browser │
+│ sender +       │      back │ 10.110.0.230 (Prism side) │ talk-back│ 10.110.0.x      │
+│ talk-back      │           │ MediaMTX + dashboard      │          │                 │
+└────────────────┘           │ :8080 http  :8443 https   │          └─────────────────┘
+                             └───────────────────────────┘
 ```
 
-The design and its reasoning are in [PLAN.md](../PLAN.md). To prove it all
-works, follow [TEST_CHECKLIST.md](TEST_CHECKLIST.md).
+**Just want the steps?** [RUN_GUIDE.md](RUN_GUIDE.md) is the short operator
+version: setup, testing, and a typical run. This file is the detailed
+reference. The design and its reasoning are in [PLAN.md](../PLAN.md). To
+prove it all works, follow [TEST_CHECKLIST.md](TEST_CHECKLIST.md).
 
 ## Contents
 
@@ -39,11 +42,11 @@ works, follow [TEST_CHECKLIST.md](TEST_CHECKLIST.md).
 |---|---|
 | Raspberry Pi 4B + microSD (16 GB+) | Raspberry Pi OS Lite 64-bit (Bookworm) |
 | USB camera with a built-in mic | Must offer MJPEG at 1280x720 @ 30 fps (most UVC webcams do) |
-| USB speaker | Plugged into the Pi; not used by the one-way stream yet ([PLAN.md §3.6](../PLAN.md#36-usb-speaker-on-the-pi)) |
+| Headphones | On the Pi's 3.5 mm jack: the astronaut hears the ground station (talk-back). The jack has no mic input; the astronaut talks through the camera mic |
 | Portable battery for the Pi | 5 V / 3 A. The dashboard shows under-voltage if it sags |
 | Jetson Orin (AGX or Nano) | JetPack 6 (Ubuntu 22.04), working Wi-Fi card, Ethernet to the rover-end Prism |
 | Ubiquiti Prism pair | Bridge mode: the ground station and the Jetson's `10.110.0.230` share one subnet |
-| Ground-station laptop | Chrome or Firefox. No plugins and no internet needed |
+| Ground-station laptop | Chrome or Firefox, plus a microphone or headset for talk-back. No plugins and no internet needed |
 | Internet, once | Each installer downloads packages the first time |
 
 ## 2. Get the code
@@ -120,89 +123,71 @@ so it never collides with a real install.
 
 ## 5. Jetson
 
-**Before you start:** JetPack 6 is installed, and the Jetson's Ethernet has its
-fixed Prism-side address, `10.110.0.230`. `JETSON_GROUND_IP` is that address:
-the Jetson's own, not the Pi's.
-
-To add it **without losing your home network** (internet, SSH), keep DHCP on
-and add the fixed address next to it:
+**Before you start:** JetPack 6 is installed and the Ethernet is plugged in.
+Ethernet is how you reach the Jetson and its internet during the install,
+because the last step turns the Wi-Fi into the hotspot.
 
 ```bash
-nmcli -f NAME,DEVICE,TYPE connection show       # e.g. "Wired connection 1" on eth0
-sudo nmcli connection modify "Wired connection 1" \
-  ipv4.method auto ipv4.addresses 10.110.0.230/24 ipv4.gateway "" ipv4.dhcp-timeout infinity
-sudo nmcli device reapply eth0                   # enP8p1s0 on an Orin Nano
-ip -4 addr show eth0                             # your DHCP address and 10.110.0.230
+make jetson                                # rover addresses (the defaults)
+make jetson ip rover 192.168.4.97/22       # or: a bench test on your home network
 ```
 
-No gateway on the fixed address, so your internet route stays as it is.
-`dhcp-timeout infinity` keeps the connection up where there's no DHCP server,
-as on the Prism link. Check that once on the bench: plug the Jetson's
-Ethernet straight into a laptop, wait 2 minutes, and `10.110.0.230` must
-still be in `ip -4 addr` (checklist B.2). Use your rover network's netmask if
-it isn't `/24`.
+It asks for your password (sudo) and, unless it's in `astronaut.local.env`,
+the hotspot password. In about 2 minutes it:
 
-**Keep the Jetson's internet on Ethernet while you install.** The last step
-turns its Wi-Fi into the hotspot.
-
-**Bench test on a home network, then the rover.** You can test everything at
-home with your home network standing in for the Prism link: the laptop is the
-ground station, and the Jetson's Ethernet has a home address. Only the
-Jetson's Ethernet side differs. The Pi and the hotspot are exactly the same in
-both places.
-
-| | Bench (home network) | Rover (Prism link) |
-|---|---|---|
-| Jetson Ethernet | its home address, e.g. `192.168.4.97/22`, gateway `192.168.4.1` | `10.110.0.230/24`, no gateway |
-| `JETSON_GROUND_IP` in `astronaut.local.env` | `192.168.4.97` | delete the line (the default is `10.110.0.230`) |
-| Ground-station laptop | anywhere on the home network | a `10.110.0.x` address on the Prism network |
-| Dashboard | `http://192.168.4.97:8080` | `http://10.110.0.230:8080` |
-
-To switch the Jetson to the rover setup, run this on the Jetson, from its
-monitor and keyboard or from the Prism side. Changing the address drops an
-SSH session on the old one.
-
-```bash
-sed -i '/^JETSON_GROUND_IP=/d' config/astronaut.local.env
-sudo nmcli connection modify "Wired connection 1" \
-  ipv4.method manual ipv4.addresses 10.110.0.230/24 ipv4.gateway "" ipv4.dns ""
-sudo nmcli device reapply enP8p1s0          # your Ethernet interface
-make restart                                 # MediaMTX picks up the new address
-```
-
-No internet needed: `make restart` doesn't download anything, and re-running
-`make jetson` or `make pi` skips apt once everything is installed. Switch
-back for a bench session the same way, with the bench values.
-
-```bash
-make jetson
-```
-
-It asks for your password (sudo) and, if not in `astronaut.local.env`, the
-hotspot password. In about 2 minutes it:
-
-1. installs the packages (ffmpeg, Flask, waitress, NetworkManager pieces);
-2. downloads the pinned MediaMTX and checks its SHA-256. It keeps a copy in
-   `vendor/`, so later re-installs work offline;
-3. finds the Wi-Fi and Prism-side interfaces (names differ between Jetson
+1. saves any `ip` arguments in `config/astronaut.local.env`, and prints the
+   addresses in use;
+2. installs the packages (ffmpeg, Flask, waitress, cheroot, openssl,
+   NetworkManager pieces). This is skipped when they're already there, so
+   re-runs work offline;
+3. downloads the pinned MediaMTX and checks its SHA-256. It keeps a copy in
+   `vendor/`;
+4. makes sure the Ethernet has the **ground-side address** `JETSON_GROUND_IP`:
+   the Jetson's own address, the one the ground station opens. It only
+   **adds** it next to the addresses already there (DHCP or static stay, so
+   SSH stays up), and refuses an address another device already answers on;
+5. finds the Wi-Fi and Prism-side interfaces (names differ between Jetson
    models);
-4. refuses to continue if another program already uses one of its ports, and
+6. refuses to continue if another program already uses one of its ports, and
    says which;
-5. writes `/etc/astronaut-streamer/mediamtx.yml` and installs two services,
-   `astronaut-mediamtx` and `astronaut-web`, which start at every boot;
-6. opens the ports in `ufw` if the firewall is on;
-7. checks both services answer, and prints the dashboard addresses;
-8. creates the hotspot `ASTRO-LINK` (WPA2, 2.4 GHz ch 6, `10.42.0.1`),
-   which also comes up at every boot.
+7. creates the dashboard's HTTPS certificate (self-signed). It covers the
+   hotspot, rover and current addresses, so it stays the same on the bench
+   and on the rover;
+8. writes `/etc/astronaut-streamer/mediamtx.yml` (the feed and the talk-back
+   stream) and installs two services, `astronaut-mediamtx` and
+   `astronaut-web`, which start at every boot;
+9. opens the ports in `ufw` if the firewall is on;
+10. checks both services answer, and prints the dashboard addresses:
+    `http://…:8080` to watch, `https://…:8443` to watch and talk back;
+11. creates the hotspot `ASTRO-LINK` (WPA2, 2.4 GHz ch 6, `10.42.0.1`),
+    which also comes up at every boot.
 
 Check it:
 
 ```bash
-make status    # services, hotspot, connected devices, stream state
+make status    # services, hotspot, connected devices, stream and talk-back state
+make ip        # the addresses in use
 ```
 
-From any machine on the rover network, `http://10.110.0.230:8080` shows the
-dashboard with **OFFLINE: Waiting for astronaut feed**.
+From the ground station, `http://10.110.0.230:8080` shows the dashboard with
+**OFFLINE: Waiting for astronaut feed**.
+
+**Bench test at home, then the rover.** Your home network can stand in for
+the Prism link: the laptop is the ground station, and the Jetson's Ethernet
+uses its home address. Only that address differs. The Pi and the hotspot are
+the same in both places.
+
+| | Bench (home network) | Rover (Prism link) |
+|---|---|---|
+| Install / switch with | `make jetson ip rover 192.168.4.97/22` | `make ip reset && make jetson` |
+| Ground-station laptop | anywhere on the home network | a `10.110.0.x` address on the Prism network |
+| Dashboard | `http://192.168.4.97:8080`, `https://…:8443` | `http://10.110.0.230:8080`, `https://…:8443` |
+
+The `/22` is your network's mask; leave it off for `/24`. Other addresses:
+`make jetson ip hotspot <addr>` moves the hotspot. The Pi then needs
+`make pi ip jetson <addr> ip <pi-addr>`, and you should change the Pi first,
+while you can still reach it. Without DHCP (the Prism link) the added
+address must stay up: check that once on the bench (checklist B.2).
 
 **ROS2 on the same Jetson:** keep DDS traffic off the hotspot. Wi-Fi sends
 multicast at its slowest rate, so DDS discovery can eat the astronaut link's
@@ -219,13 +204,14 @@ For Fast DDS (the Humble default), use an XML profile with an interface
 whitelist for the Prism-side address.
 
 Re-run `make jetson` any time. It's also how changes to the settings take
-effect on the Jetson.
+effect on the Jetson, and it doesn't need internet once everything is
+installed.
 
 ## 6. Raspberry Pi
 
 **Flash the card** with Raspberry Pi Imager: *Raspberry Pi OS Lite (64-bit)*.
 In the customisation settings:
-- hostname `astronaut-pi`
+- hostname `billee-astronaut`
 - a username and password
 - **your lab/home Wi-Fi** (the Pi needs internet for the install)
 - Wi-Fi country
@@ -237,28 +223,38 @@ Boot it and SSH in over the lab network.
 sudo apt install -y git make
 git clone https://github.com/LucaLanzi/astronaut-streamer.git
 cd astronaut-streamer
-echo 'HOTSPOT_PSK=the-same-password-as-the-jetson' > config/astronaut.local.env
-make pi
+echo 'HOTSPOT_PSK=the-same-password-as-the-jetson' >> config/astronaut.local.env
+make pi                                     # or, if you moved the hotspot:
+                                            # make pi ip jetson 192.168.50.1 ip 192.168.50.2
 ```
 
 `make pi`:
 
 1. sets the Wi-Fi country (Pi OS keeps Wi-Fi off until it's set);
-2. installs ffmpeg, v4l-utils, alsa-utils, iw, and the SSH server, and turns
-   SSH on;
+2. installs ffmpeg, v4l-utils, alsa-utils, iw, git and the SSH server, and
+   turns SSH on;
 3. adds you to the `video` and `audio` groups;
 4. saves the hotspot as the Pi's preferred Wi-Fi, with the fixed address
    `10.42.0.2` and power saving off;
-5. runs a quick bench check (camera, mic, speaker detection);
-6. installs and starts the `astronaut-sender` service. It waits for the
-   Jetson, then streams on its own, at every boot.
+5. runs a quick bench check (camera, mic, headphones detection);
+6. installs and starts two services that run at every boot:
+   - `astronaut-sender`: camera and mic to the Jetson, always on, streaming as
+     soon as the Jetson answers;
+   - `astronaut-talkback`: plays the ground station's talk-back on the
+     headphones whenever someone talks.
 
 Now run the full bench check and keep its summary (the checklist asks for the
 numbers):
 
 ```bash
-make probe     # camera modes, mic level, speaker beep, encoder speed + CPU, Wi-Fi
+make probe       # camera modes, mic level, headphone beep, encoder speed + CPU, Wi-Fi
+make headphones  # just the beep in the headphones
 ```
+
+The talk-back output is the Pi's 3.5 mm jack (`TALKBACK_MATCH=Headphones`).
+To use a USB speaker or headset instead, set `TALKBACK_MATCH` to part of its
+name (`make probe` lists the names). The volume is `TALKBACK_VOLUME` (default
+`90%`).
 
 **Switch to the hotspot.** Take the Pi near the Jetson and either reboot it,
 or:
@@ -274,9 +270,18 @@ through the Jetson (next section).
 
 1. Plug the laptop into the ground-end Prism, and give it an address on the
    rover subnet (`10.110.0.x`). `ping 10.110.0.230` must answer.
-2. Open **`http://10.110.0.230:8080`** in Chrome or Firefox.
+2. Open **`https://10.110.0.230:8443`** in Chrome or Firefox. The first
+   time, the browser warns about the certificate (it's the Jetson's own,
+   self-signed): *Advanced → Proceed*. Plain `http://10.110.0.230:8080` works
+   for watching too, but browsers only allow the microphone on HTTPS.
 3. The video starts on its own, muted. Click **🔊 Click for audio** once
    (browsers require a click before playing sound).
+4. **Talk-back:** pick a **Microphone** and click **Talk-back: OFF** to turn
+   it on. The browser asks for mic permission the first time; then the
+   dropdown lists your microphones by name. Wait for *"Live: the astronaut
+   hears you"* (the Pi has started playing). **Mute** pauses it instantly, and
+   while muted, holding **Space** talks (push-to-talk). Use a headset if you
+   can: the browser cancels echo, but a headset is cleaner.
 
 **SSH to the Jetson and the Pi** from the laptop. Add to `~/.ssh/config`:
 
@@ -314,6 +319,8 @@ reconnects by itself, so just keep it open.
 | **DASHBOARD DOWN** | The page can't reach the Jetson at all (Prism link down?) |
 | **NO AUDIO** | Streaming video only: the mic is missing or failed |
 | **PI SILENT** | No heartbeat from the Pi for 6 s or more |
+| **TALKING** | Your microphone is live to the astronaut |
+| Stream panel: Talk-back | *live, the Pi is listening*: they hear you. *the Pi isn't playing it yet*: wait, or restart the Pi's services |
 | Pi panel: Wi-Fi signal | dBm: about -60 good, -70 fair, -80 weak |
 | Pi panel: Throttling | Under-voltage or overheating on the Pi |
 | Pi panel: Encoder | `h264_v4l2m2m` = hardware; `libx264` = software (more CPU and heat) |
@@ -326,6 +333,7 @@ concerned, then:
 - **Pi** (resolution, bitrate, encoder, transport, devices): `make restart`
   on the Pi.
 - **Jetson** (ports, interfaces, MediaMTX): `make jetson` again.
+- **Addresses:** `make jetson ip …` / `make pi ip …` (§5), `make ip` to see them.
 - **Hotspot** (SSID, password, channel): `sudo bash jetson/hotspot.sh up` on
   the Jetson, then `make pi` on the Pi.
 
@@ -357,14 +365,18 @@ Ctrl-C.
 | Command | Where | What it does |
 |---|---|---|
 | `make jetson` | Jetson | Install or update everything, hotspot included |
+| `make jetson ip rover <addr>` / `ip hotspot <addr>` | Jetson | The same, with other addresses (saved) |
 | `make hotspot` | Jetson | Hotspot state and connected devices |
 | `sudo bash jetson/hotspot.sh up\|start\|stop\|remove` | Jetson | Change the hotspot |
 | `make view` | Jetson | Watch and listen locally (ffplay) |
-| `make pi` | Pi | Install or update everything, sender service included |
+| `make pi` | Pi | Install or update everything: sender and talk-back services |
+| `make pi ip <pi-addr>` / `ip jetson <addr>` | Pi | The same, with other hotspot addresses (saved) |
+| `make headphones` | Pi | Play a test tone on the talk-back output |
 | `make probe` | Pi | Full bench check (pauses the sender) |
 | `make test-pattern` | Pi | Colour bars + tone instead of the camera (pauses the sender) |
 | `make push-pi` | laptop | Push the current commit to the Pi through the Jetson and restart the sender |
-| `make status` | either | Services, Wi-Fi/hotspot, and stream state |
+| `make ip` / `make ip reset` | either | Show the addresses in use / back to the rover defaults |
+| `make status` | either | Services, Wi-Fi/hotspot, stream and talk-back state |
 | `make logs` | either | Follow the service logs |
 | `make restart` | either | Restart this machine's services |
 | `make uninstall` | either | Remove this machine's services |
@@ -396,6 +408,12 @@ the services are doing.
 | Delay keeps growing | Pi panel bitrate, Wi-Fi signal | `TRANSPORT=srt` in the Pi's `astronaut.local.env`, then `make restart` |
 | Hotspot won't start | `iw list` shows `* AP` under "Supported interface modes" | No AP support: USB Wi-Fi adapter (PLAN.md §8); `sudo apt install dnsmasq-base` |
 | Pi never joins | On the Pi: `nmcli device wifi list` shows ASTRO-LINK? | Same password on both; Wi-Fi country set; `rfkill list` |
+| No talk-back panel, just a link to a secure page | You're on `http://` | Open the `https://…:8443` address and accept the certificate once |
+| "Couldn't start talk-back" / mic blocked | Browser's site settings (lock icon) | Allow the microphone for the site, then turn talk-back on again |
+| Talk-back stays at "waiting for the Pi" | On the Pi: `make status` (talk-back log lines) | `make restart` on the Pi; `make probe` checks the headphones output |
+| Talk-back live, but nothing in the headphones | On the Pi: `make headphones` | Plug fully in; raise `TALKBACK_VOLUME`; `alsamixer -c Headphones` |
+| Talk-back choppy or crackling | Pi panel: Wi-Fi signal | Move closer; raise `TALKBACK_BUFFER_MS` (default 80) on the Pi, then `make restart` |
+| `make jetson` says another device answers on the ground-side address | The address is taken (e.g. by the Pi) | Use the Jetson's own address: `make jetson ip rover <addr>` |
 
 ## 11. Uninstall
 

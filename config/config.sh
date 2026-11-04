@@ -2,6 +2,8 @@
 # shellcheck shell=bash
 
 ASTRO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Per-machine settings (git-ignored). Tests point this somewhere else.
+ASTRO_LOCAL_ENV="${ASTRO_LOCAL_ENV:-$ASTRO_ROOT/config/astronaut.local.env}"
 
 info() { printf '==> %s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
@@ -49,6 +51,42 @@ apt_install() {
   DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
 }
 
+# Jetson: make sure its Ethernet has the ground-side address $1/$2 (interface
+# $3, or the connected Ethernet). Only ever ADDS it next to the addresses
+# already there (DHCP or static stay), so it can't cut off an SSH session, and
+# refuses an address another device already answers on (like the Pi's).
+ensure_ground_address() {
+  local ip="$1" dev con addr="$1/$2"
+  valid_ipv4 "$addr" || die "JETSON_GROUND_IP/JETSON_GROUND_PREFIX isn't a valid address: $addr"
+  if [ -n "$(iface_with_ip "$ip")" ]; then
+    info "Ground-side address: $ip is already on $(iface_with_ip "$ip")"
+    return 0
+  fi
+  if ping -c 2 -W 1 "$ip" >/dev/null 2>&1; then
+    die "another device already answers on $ip: pick the Jetson's own address (make jetson ip rover <addr>)"
+  fi
+  dev="${3:-$(nmcli -t -f DEVICE,TYPE,STATE device | awk -F: '$2 == "ethernet" && $3 == "connected" { print $1; exit }')}"
+  if [ -z "$dev" ]; then
+    warn "no connected Ethernet to put $addr on: plug it in, then re-run 'make jetson'"
+    return 0
+  fi
+  con="$(nmcli -g GENERAL.CONNECTION device show "$dev" 2>/dev/null || true)"
+  if [ -z "$con" ]; then
+    warn "$dev has no active NetworkManager connection: can't add $addr"
+    return 0
+  fi
+  info "Ground-side address: adding $addr to $dev ('$con'), next to its current addresses"
+  nmcli connection modify "$con" +ipv4.addresses "$addr"
+  # With DHCP, keep the connection up even where no DHCP server answers (the Prism link).
+  if [ "$(nmcli -g ipv4.method connection show "$con")" = auto ]; then
+    nmcli connection modify "$con" ipv4.dhcp-timeout infinity
+  fi
+  nmcli device reapply "$dev" >/dev/null ||
+    warn "couldn't apply it live; it takes effect at the next reboot (or: sudo nmcli connection up '$con')"
+  sleep "${ASTRO_SETTLE_S:-2}"   # let the address come up before it's looked for
+  info "  (to undo: sudo nmcli connection modify '$con' -ipv4.addresses $addr)"
+}
+
 # True if something listens on port $2 ($1 = tcp or udp).
 port_in_use() {
   local flag=-t
@@ -72,7 +110,7 @@ port_owner() {
 load_config() {
   local file line key value
   local -A from_files=()
-  for file in "$ASTRO_ROOT/config/astronaut.env" "$ASTRO_ROOT/config/astronaut.local.env"; do
+  for file in "$ASTRO_ROOT/config/astronaut.env" "$ASTRO_LOCAL_ENV"; do
     [ -f "$file" ] || continue
     while IFS= read -r line || [ -n "$line" ]; do
       line="${line#"${line%%[![:space:]]*}"}"
@@ -92,6 +130,51 @@ load_config() {
       from_files[$key]=1
     done <"$file"
   done
+}
+
+# Save KEY=value in the per-machine settings file (replacing an existing line).
+set_local_setting() {
+  local key="$1" value="$2" tmp
+  touch "$ASTRO_LOCAL_ENV"
+  tmp="$(mktemp)"
+  grep -v "^${key}=" "$ASTRO_LOCAL_ENV" >"$tmp" || true
+  printf '%s=%s\n' "$key" "$value" >>"$tmp"
+  cat "$tmp" >"$ASTRO_LOCAL_ENV"
+  rm -f "$tmp"
+}
+
+# Remove KEY from the per-machine settings file (back to astronaut.env's value).
+unset_local_setting() {
+  local key="$1" tmp
+  [ -f "$ASTRO_LOCAL_ENV" ] || return 0
+  tmp="$(mktemp)"
+  grep -v "^${key}=" "$ASTRO_LOCAL_ENV" >"$tmp" || true
+  cat "$tmp" >"$ASTRO_LOCAL_ENV"
+  rm -f "$tmp"
+}
+
+# True if $1 is a dotted IPv4 address, optionally with /prefix (0-32).
+valid_ipv4() {
+  local addr="${1%/*}" prefix="" octet
+  [[ "$1" == */* ]] && prefix="${1#*/}"
+  [[ "$addr" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  for octet in "${BASH_REMATCH[@]:1}"; do
+    [ "$octet" -le 255 ] || return 1
+  done
+  [ -z "$prefix" ] || { [[ "$prefix" =~ ^[0-9]{1,2}$ ]] && [ "$prefix" -le 32 ]; }
+}
+
+# The 32-bit number for a dotted IPv4 address.
+ipv4_to_int() {
+  local IFS=. a b c d
+  read -r a b c d <<<"$1"
+  echo $(((a << 24) | (b << 16) | (c << 8) | d))
+}
+
+# True if addresses $1 and $2 are in the same /$3 subnet.
+same_subnet() {
+  local mask=$(((0xFFFFFFFF << (32 - $3)) & 0xFFFFFFFF))
+  [ $(($(ipv4_to_int "$1") & mask)) -eq $(($(ipv4_to_int "$2") & mask)) ]
 }
 
 # Make sure HOTSPOT_PSK holds a valid WPA2 password, asking for it if empty.

@@ -100,14 +100,32 @@ class FeedMonitorTests(unittest.TestCase):
         self.assertEqual(st["tracks"], ["H264", "Opus"])
 
 
+class FakeUpstream:
+    """Stands in for MediaMTX's WebRTC/HLS servers: records the last request."""
+
+    def __init__(self):
+        self.calls = []
+        self.response = (201, {"Content-Type": "application/sdp"}, b"v=0 answer")
+
+    def __call__(self, method, url, body=None, headers=None, timeout=10.0):
+        self.calls.append((method, url, body, headers))
+        return self.response
+
+
 @unittest.skipIf(app is None, "Flask not installed")
 class RouteTests(unittest.TestCase):
     def setUp(self):
         self.clock = FakeClock()
         self.mtx = FakeMediaMTX()
-        cfg = {"STREAM_PATH": "astronaut", "WEBRTC_PORT": "8889", "HLS_PORT": "8888"}
-        self.app = app.create_app(cfg, app.FeedMonitor("http://x", "astronaut", self.mtx, self.clock),
-                                  app.HeartbeatStore(self.clock))
+        self.talk_mtx = FakeMediaMTX()
+        self.upstream = FakeUpstream()
+        cfg = {"STREAM_PATH": "astronaut", "TALKBACK_PATH": "talkback", "WEBRTC_PORT": "8889",
+               "HLS_PORT": "8888", "WEB_TLS_PORT": "8443"}
+        self.app = app.create_app(
+            cfg, app.FeedMonitor("http://x", "astronaut", self.mtx, self.clock),
+            app.HeartbeatStore(self.clock),
+            app.FeedMonitor("http://x", "talkback", self.talk_mtx, self.clock),
+            fetch=self.upstream)
         self.client = self.app.test_client()
 
     def test_index(self):
@@ -115,8 +133,60 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         html = resp.get_data(as_text=True)
         self.assertIn("Astronaut feed", html)
-        self.assertIn('"webrtcPort": 8889', html)
+        self.assertIn('"talkbackPath": "talkback"', html)
+        self.assertIn('"tlsPort": 8443', html)
+        self.assertIn("Talk-back to the astronaut", html)
         self.assertIn("player.js", html)
+
+    def test_whep_is_passed_to_mediamtx(self):
+        resp = self.client.post("/webrtc/astronaut/whep", data="v=0 offer",
+                                content_type="application/sdp")
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.get_data(), b"v=0 answer")
+        method, url, body, headers = self.upstream.calls[-1]
+        self.assertEqual((method, url, body), ("POST", "http://127.0.0.1:8889/astronaut/whep", b"v=0 offer"))
+        self.assertEqual(headers["Content-Type"], "application/sdp")
+
+    def test_whip_only_for_talkback(self):
+        self.assertEqual(self.client.post("/webrtc/talkback/whip", data="o",
+                                          content_type="application/sdp").status_code, 201)
+        self.assertEqual(self.upstream.calls[-1][1], "http://127.0.0.1:8889/talkback/whip")
+        calls = len(self.upstream.calls)
+        for url in ("/webrtc/astronaut/whip", "/webrtc/talkback/whep", "/webrtc/other/whep"):
+            self.assertEqual(self.client.post(url, data="o", content_type="application/sdp").status_code,
+                             404, url)
+        self.assertEqual(len(self.upstream.calls), calls, "refused requests never reach MediaMTX")
+
+    def test_mediamtx_errors_pass_through(self):
+        self.upstream.response = (404, {"Content-Type": "text/plain"}, b"no stream")
+        self.assertEqual(self.client.post("/webrtc/astronaut/whep", data="o",
+                                          content_type="application/sdp").status_code, 404)
+
+    def test_hls_proxy(self):
+        self.upstream.response = (200, {"Content-Type": "application/vnd.apple.mpegurl",
+                                        "Cache-Control": "no-cache"}, b"#EXTM3U")
+        resp = self.client.get("/hls/astronaut/index.m3u8?_HLS_msn=5")
+        self.assertEqual(resp.get_data(), b"#EXTM3U")
+        self.assertEqual(resp.headers["Cache-Control"], "no-cache")
+        self.assertEqual(self.upstream.calls[-1][1], "http://127.0.0.1:8888/astronaut/index.m3u8?_HLS_msn=5")
+        self.client.get("/hls/astronaut/")
+        self.assertEqual(self.upstream.calls[-1][1], "http://127.0.0.1:8888/astronaut/")
+        self.assertEqual(self.client.get("/hls/other/index.m3u8").status_code, 404)
+
+    def test_talkback_status(self):
+        self.talk_mtx.response = (404, None)
+        self.assertEqual(self.client.get("/api/talkback").get_json()["live"], False)
+        self.clock.t += 2
+        self.talk_mtx.response = (200, path_body(tracks=("Opus",), readers=1))
+        st = self.client.get("/api/talkback").get_json()
+        self.assertEqual((st["live"], st["listeners"]), (True, 1))
+        self.assertEqual(self.client.get("/api/status").get_json()["talkback"]["listeners"], 1)
+
+    def test_big_sdp_refused(self):
+        resp = self.client.post("/webrtc/astronaut/whep", data="x" * 70_000,
+                                content_type="application/sdp")
+        self.assertEqual(resp.status_code, 413)
+        self.assertEqual(self.upstream.calls, [])
 
     def test_static(self):
         for name in ("player.js", "style.css"):

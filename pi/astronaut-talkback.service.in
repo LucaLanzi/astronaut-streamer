@@ -1,0 +1,17 @@
+[Unit]
+Description=astronaut-streamer: ground-station talk-back -> Pi headphones
+Documentation=file://@ASTRO_ROOT@/docs/RUN_GUIDE.md
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+User=@SERVICE_USER@
+SupplementaryGroups=audio
+ExecStart=/usr/bin/python3 -u @ASTRO_ROOT@/pi/talkback.py
+Restart=always
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

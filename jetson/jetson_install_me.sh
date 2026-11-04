@@ -36,8 +36,8 @@ else
 fi
 
 # ----------------------------------------------------------------- packages
-apt_install ffmpeg python3 python3-flask python3-waitress curl ca-certificates \
-  iw iproute2 network-manager dnsmasq-base
+apt_install ffmpeg python3 python3-flask python3-waitress python3-cheroot openssl curl \
+  ca-certificates iw iproute2 network-manager dnsmasq-base
 
 # ----------------------------------------------------------------- MediaMTX
 # The pinned release, downloaded once into vendor/ and checked against the
@@ -54,15 +54,20 @@ else
   info "Installed $(/usr/local/bin/mediamtx --help 2>&1 | grep -o 'MediaMTX v[^,]*')"
 fi
 
+# ------------------------------------------------- the ground-side address
+# The Jetson's Ethernet needs JETSON_GROUND_IP: what the ground station opens.
+# This only ever ADDS it next to the addresses already there (DHCP or static
+# stay), so it can't cut off an SSH session. It refuses an address another
+# device already answers on (like the Pi's).
+ensure_ground_address "$JETSON_GROUND_IP" "$JETSON_GROUND_PREFIX" "$JETSON_GROUND_IFACE"
+
 # --------------------------------------------------------------- interfaces
 HOTSPOT_IFACE="$(wifi_iface "$JETSON_HOTSPOT_IFACE")"
 GROUND_IFACE="${JETSON_GROUND_IFACE:-$(iface_with_ip "$JETSON_GROUND_IP")}"
 [ -n "$HOTSPOT_IFACE" ] || warn "no Wi-Fi interface found: the hotspot can't run (PLAN.md §8: USB Wi-Fi fallback)"
 if [ -z "$GROUND_IFACE" ]; then
-  warn "no interface has JETSON_GROUND_IP=$JETSON_GROUND_IP. That setting is this Jetson's OWN"
-  warn "address on the Prism side (normally 10.110.0.230), not the Pi's. Check config/astronaut*.env,"
-  warn "and give the Jetson's Ethernet that address (docs/SETUP.md §5), then re-run this installer."
-  warn "Continuing: the dashboard still works on every address the Jetson has."
+  warn "no interface has JETSON_GROUND_IP=$JETSON_GROUND_IP yet (see above). Continuing: the"
+  warn "dashboard still works on every address the Jetson has."
 fi
 # Offer WebRTC only on the Prism-side and hotspot interfaces when both are
 # known; otherwise every interface, so the ground station is never left out.
@@ -80,7 +85,7 @@ info "Stopping old astronaut-streamer services (if any) to check ports..."
 systemctl stop "${UNITS[@]}" 2>/dev/null || true
 
 busy=()
-for spec in "tcp $WEB_PORT WEB_PORT" "tcp $RTSP_PORT RTSP_PORT" "tcp $WEBRTC_PORT WEBRTC_PORT" \
+for spec in "tcp $WEB_PORT WEB_PORT" "tcp $WEB_TLS_PORT WEB_TLS_PORT" "tcp $RTSP_PORT RTSP_PORT" "tcp $WEBRTC_PORT WEBRTC_PORT" \
   "tcp $HLS_PORT HLS_PORT" "tcp $MEDIAMTX_API_PORT MEDIAMTX_API_PORT" \
   "udp $WEBRTC_UDP_PORT WEBRTC_UDP_PORT" "udp $SRT_PORT SRT_PORT"; do
   read -r proto port name <<<"$spec"
@@ -93,6 +98,39 @@ if [ "${#busy[@]}" -gt 0 ]; then
   printf '  %s\n' "${busy[@]}" >&2
   die "free those ports, or pick others in config/astronaut.local.env, then re-run"
 fi
+
+# ------------------------------------------------------- HTTPS certificate
+# Browsers only allow the microphone (talk-back) on HTTPS pages, so the
+# dashboard also serves HTTPS with a self-signed certificate. It covers the
+# hotspot address, the rover address, JETSON_GROUND_IP and every address the
+# Jetson has now, so it's the same certificate on the bench and on the rover.
+# An existing one is kept while it still covers those, so the ground station
+# doesn't have to accept a new one.
+TLS_DIR=/etc/astronaut-streamer/tls
+mkdir -p "$TLS_DIR"
+want=(127.0.0.1 "$JETSON_HOTSPOT_IP" 10.110.0.230 "$JETSON_GROUND_IP")
+while read -r addr; do want+=("$addr"); done < <(ip -o -4 addr show | awk '$2 != "lo" { split($4, a, "/"); print a[1] }')
+covered=true
+if [ -f "$TLS_DIR/dashboard.crt" ]; then
+  have="$(openssl x509 -in "$TLS_DIR/dashboard.crt" -noout -ext subjectAltName 2>/dev/null || true)"
+  for addr in 10.110.0.230 "$JETSON_GROUND_IP"; do
+    grep -qF "IP Address:$addr" <<<"$have" || covered=false
+  done
+else
+  covered=false
+fi
+if $covered; then
+  info "HTTPS certificate: keeping the existing one"
+else
+  sans="DNS:$(hostname),DNS:$(hostname).local"
+  for addr in $(printf '%s\n' "${want[@]}" | awk 'NF && !seen[$0]++'); do sans="$sans,IP:$addr"; done
+  info "HTTPS certificate: creating one for $sans"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=astronaut-streamer $(hostname)" \
+    -addext "subjectAltName=$sans" -keyout "$TLS_DIR/dashboard.key" -out "$TLS_DIR/dashboard.crt" 2>/dev/null
+fi
+chown -R "$SERVICE_USER": "$TLS_DIR"
+chmod 600 "$TLS_DIR/dashboard.key"
+chmod 644 "$TLS_DIR/dashboard.crt"
 
 # ------------------------------------------------------- config + services
 info "Writing /etc/astronaut-streamer/mediamtx.yml and the systemd services..."
@@ -107,7 +145,7 @@ systemctl restart "${UNITS[@]}"
 
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "^Status: active"; then
   info "ufw is active: opening the stream and dashboard ports..."
-  for p in "$WEB_PORT/tcp" "$WEBRTC_PORT/tcp" "$WEBRTC_UDP_PORT/udp" "$HLS_PORT/tcp" \
+  for p in "$WEB_PORT/tcp" "$WEB_TLS_PORT/tcp" "$WEBRTC_PORT/tcp" "$WEBRTC_UDP_PORT/udp" "$HLS_PORT/tcp" \
     "$RTSP_PORT/tcp" "$SRT_PORT/udp"; do
     ufw allow "$p" comment astronaut-streamer >/dev/null
   done
@@ -142,8 +180,8 @@ $ok || die "setup finished but a service isn't running; see the log lines above"
 
 echo
 echo "Done. The services start by themselves at every boot."
-echo "Dashboard addresses:"
-ip -o -4 addr show | awk -v port="$WEB_PORT" -v g="$JETSON_GROUND_IP" '$2 != "lo" {
-  split($4, a, "/"); note = (a[1] == g) ? "   <- ground station (Prism link)" : ""
-  printf "  http://%s:%s   (%s)%s\n", a[1], port, $2, note }'
+echo "Dashboard addresses (HTTPS adds talk-back; accept the certificate warning once):"
+ip -o -4 addr show | awk -v port="$WEB_PORT" -v tls="$WEB_TLS_PORT" -v g="$JETSON_GROUND_IP" '$2 != "lo" {
+  split($4, a, "/"); note = (a[1] == g) ? "   <- ground station" : ""
+  printf "  http://%s:%s   https://%s:%s   (%s)%s\n", a[1], port, a[1], tls, $2, note }'
 echo "Next: the hotspot (sudo ./hotspot.sh up, or 'make jetson' does it), then the Pi."

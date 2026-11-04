@@ -2,16 +2,22 @@
 """Run the whole pipeline on one machine and check it like a ground station would.
 
 Starts the real MediaMTX (pinned release, rendered from jetson/mediamtx.yml.in),
-the dashboard (jetson/app.py) and the sender (pi/sender.py --test-pattern),
-then opens the dashboard in headless Chrome and checks that WebRTC video and
-audio actually play. Then it breaks things on purpose (kills ffmpeg, restarts
-MediaMTX, stops the sender) and checks everything recovers on its own.
+the dashboard (jetson/app.py, HTTP + HTTPS) and the sender
+(pi/sender.py --test-pattern), then opens the HTTPS dashboard in headless
+Chrome and checks:
+
+- WebRTC video and audio actually play;
+- talk-back: Chrome's fake microphone is published from the page, the real
+  pi/talkback.py receives it (recorded to a WAV instead of the headphones),
+  and the recording has sound; mute and push-to-talk work;
+- recovery: kills ffmpeg, restarts MediaMTX, stops the sender.
 
     make e2e          (sets up the environment first, then runs this)
+    E2E_KEEP=1 make e2e   keep the logs and screenshot even when all checks pass
 
-Uses ports 18000-19999 so it never collides with a real install. Needs
-ffmpeg with libx264 + libopus (or imageio-ffmpeg), Flask, waitress,
-Playwright, and Google Chrome (or Playwright's Chromium).
+Uses ports 18000-19999 so it never collides with a real install. Needs ffmpeg
+with libx264 + libopus (or imageio-ffmpeg), Flask, waitress, cheroot,
+Playwright, openssl, and Google Chrome (or Playwright's Chromium).
 """
 
 from __future__ import annotations
@@ -19,8 +25,11 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import signal
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -33,16 +42,19 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "common"))
 from envconfig import load_config  # noqa: E402
 
-PORTS = {"WEB_PORT": "18080", "RTSP_PORT": "18554", "WEBRTC_PORT": "18889",
-         "WEBRTC_UDP_PORT": "18189", "HLS_PORT": "18888", "SRT_PORT": "18890",
-         "MEDIAMTX_API_PORT": "19997"}
+PORTS = {"WEB_PORT": "18080", "WEB_TLS_PORT": "18443", "RTSP_PORT": "18554",
+         "WEBRTC_PORT": "18889", "WEBRTC_UDP_PORT": "18189", "HLS_PORT": "18888",
+         "SRT_PORT": "18890", "MEDIAMTX_API_PORT": "19997"}
 API = f"http://127.0.0.1:{PORTS['MEDIAMTX_API_PORT']}"
 WEB = f"http://127.0.0.1:{PORTS['WEB_PORT']}"
+WEB_TLS = f"https://127.0.0.1:{PORTS['WEB_TLS_PORT']}"
 PUBLISH_URL = f"rtsp://127.0.0.1:{PORTS['RTSP_PORT']}/astronaut"
+INSECURE = ssl._create_unverified_context()  # the dashboard's certificate is self-signed
 
 work = Path(tempfile.mkdtemp(prefix="astronaut-e2e-"))
 procs: dict[str, subprocess.Popen] = {}
 results: list[tuple[bool, str]] = []
+ENV: dict = {}
 
 
 def check(name: str, ok, detail: str = "") -> bool:
@@ -53,10 +65,10 @@ def check(name: str, ok, detail: str = "") -> bool:
 
 def get(url: str, timeout: float = 2) -> tuple[int, str]:
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
-            return r.status, r.read().decode()
+        with urllib.request.urlopen(url, timeout=timeout, context=INSECURE) as r:
+            return r.status, r.read().decode(errors="replace")
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
+        return e.code, e.read().decode(errors="replace")
     except OSError as e:
         return 0, str(e)
 
@@ -80,26 +92,35 @@ def mediamtx_binary() -> Path:
     return path
 
 
-def ffmpeg_dir() -> str:
-    """A directory with an `ffmpeg` to put first on the sender's PATH."""
-    if shutil.which("ffmpeg"):
-        return ""
+def ffmpeg_path() -> str:
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
     import imageio_ffmpeg
-    d = work / "bin"
-    d.mkdir()
-    (d / "ffmpeg").symlink_to(imageio_ffmpeg.get_ffmpeg_exe())
-    return str(d)
+    return imageio_ffmpeg.get_ffmpeg_exe()
 
 
 def environment() -> dict:
-    env = {**os.environ, **PORTS, "JETSON_HOTSPOT_IP": "127.0.0.1", "STREAM_PATH": "astronaut"}
-    extra = ffmpeg_dir()
-    if extra:
-        env["PATH"] = f"{extra}:{env['PATH']}"
+    env = {**os.environ, **PORTS, "JETSON_HOTSPOT_IP": "127.0.0.1", "STREAM_PATH": "astronaut",
+           "TALKBACK_PATH": "talkback", "ASTRO_TLS_DIR": str(work / "tls")}
+    if not shutil.which("ffmpeg"):
+        d = work / "bin"
+        d.mkdir()
+        (d / "ffmpeg").symlink_to(ffmpeg_path())
+        env["PATH"] = f"{d}:{env['PATH']}"
     return env
 
 
-ENV: dict = {}
+def make_certificate() -> bool:
+    """A self-signed certificate like the installer makes."""
+    (work / "tls").mkdir()
+    out = subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+         "-subj", "/CN=astronaut-streamer e2e", "-addext", "subjectAltName=IP:127.0.0.1",
+         "-keyout", str(work / "tls/dashboard.key"), "-out", str(work / "tls/dashboard.crt")],
+        capture_output=True, text=True)
+    return check("create a self-signed HTTPS certificate", out.returncode == 0,
+                 out.stderr.strip()[-200:] if out.returncode else "")
 
 
 def start(name: str, cmd: list[str]) -> None:
@@ -126,12 +147,36 @@ def path_state() -> tuple[int, dict | str]:
         return code, body
 
 
-def launch_browser(p):
+def talkback_state() -> dict:
+    code, body = get(f"{WEB}/api/talkback")
+    return json.loads(body) if code == 200 else {}
+
+
+def lan_ip() -> str | None:
+    """This machine's LAN address: an http:// page there is NOT a secure context."""
     try:
-        return p.chromium.launch(channel="chrome", headless=True)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))
+            ip = s.getsockname()[0]
+            return None if ip.startswith("127.") else ip
+    except OSError:
+        return None
+
+
+def peak_db(wav: Path) -> float | None:
+    out = subprocess.run([ffmpeg_path(), "-hide_banner", "-nostats", "-i", str(wav),
+                          "-af", "volumedetect", "-f", "null", "-"], capture_output=True, text=True)
+    m = re.search(r"max_volume:\s*(-?inf|-?[\d.]+) dB", out.stderr)
+    return float(m.group(1)) if m else None
+
+
+def launch_browser(p):
+    args = ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"]
+    try:
+        return p.chromium.launch(channel="chrome", headless=True, args=args)
     except Exception:
         try:
-            return p.chromium.launch(headless=True)
+            return p.chromium.launch(headless=True, args=args)
         except Exception as exc:
             sys.exit(f"no browser for Playwright ({exc}).\nInstall Google Chrome, or run: "
                      f"{Path(sys.executable).parent}/playwright install chromium")
@@ -153,15 +198,62 @@ MEDIA_JS = """async () => {
   return out;
 }"""
 
+TALK_JS = """() => {
+  const pc = window.astro.talkPc;
+  const sender = pc && pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
+  return {state: pc ? pc.connectionState : 'none', micOn: sender ? sender.track.enabled : null,
+          status: document.getElementById('tb-status').textContent,
+          mics: document.getElementById('tb-mic').options.length};
+}"""
+
+
+def talkback_checks(page) -> None:
+    talk = lambda: page.evaluate(TALK_JS)  # noqa: E731
+    check("talk-back: microphone dropdown and toggle are there", page.is_visible("#tb-mic")
+          and "OFF" in page.inner_text("#tb-start"), page.inner_text("#tb-start"))
+    wav = work / "talkback.wav"
+    start("pi-talkback", [sys.executable, str(ROOT / "pi/talkback.py"), "--to-file", str(wav), "--once"])
+    page.click("#tb-start")
+    check("talk-back: the page publishes the mic (WHIP through the dashboard)",
+          wait(lambda: talk()["state"] == "connected" and talkback_state().get("live"), 15),
+          json.dumps(talk()))
+    check("talk-back: the Pi's player picks it up",
+          wait(lambda: talkback_state().get("listeners", 0) >= 1, 15), json.dumps(talkback_state()))
+    check("talk-back: the page says the astronaut hears you",
+          wait(lambda: "astronaut hears you" in talk()["status"], 10), talk()["status"])
+    check("talk-back: the dropdown now lists the microphones by name",
+          wait(lambda: talk()["mics"] > 1, 5), f"{talk()['mics']} entries")
+    page.wait_for_timeout(3000)
+    page.screenshot(path=str(work / "dashboard-talkback.png"))
+
+    page.click("#tb-mute")
+    check("talk-back: Mute turns the mic off", talk()["micOn"] is False, talk()["status"])
+    page.keyboard.down("Space")
+    ptt_on = talk()["micOn"]
+    page.keyboard.up("Space")
+    check("talk-back: holding Space talks while muted (push-to-talk)",
+          ptt_on is True and talk()["micOn"] is False)
+    page.click("#tb-mute")
+    page.wait_for_timeout(1000)
+
+    page.click("#tb-start")   # now "Stop talk-back"
+    check("talk-back: Stop ends it", wait(lambda: not talkback_state().get("live"), 10))
+    done = wait(lambda: procs["pi-talkback"].poll() is not None, 15)
+    db = peak_db(wav) if wav.exists() else None
+    check("talk-back: what the Pi received has sound in it", done and db is not None and db > -50,
+          f"peak {db} dB" if db is not None else "no recording")
+    stop("pi-talkback")
+
 
 def browser_checks() -> None:
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         browser = launch_browser(p)
-        page = browser.new_page(viewport={"width": 1400, "height": 860})
+        context = browser.new_context(ignore_https_errors=True, viewport={"width": 1400, "height": 1000})
+        page = context.new_page()
         errors: list[str] = []
         page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
-        page.goto(WEB + "/")
+        page.goto(WEB_TLS + "/")
         media = lambda: page.evaluate(MEDIA_JS)  # noqa: E731
 
         def playing(min_frames=30, after_connects=0):
@@ -170,7 +262,7 @@ def browser_checks() -> None:
                          and m["connects"] > after_connects) else None
 
         m = wait(playing, 25)
-        check("browser: WebRTC connects and decodes video", m, json.dumps(m or media()))
+        check("browser (HTTPS page): WebRTC connects and decodes video", m, json.dumps(m or media()))
         if m:
             check("browser: video is 1280x720", m["width"] == 1280, f"width={m['width']}")
             check("browser: Opus audio arrives over WebRTC",
@@ -179,7 +271,9 @@ def browser_checks() -> None:
             page.click("#unmute")
             m = media()
             check("browser: one click turns audio on", not m["muted"] and not m["unmuteVisible"])
-            page.screenshot(path=str(work / "dashboard.png"))
+
+        talkback_checks(page)
+        page.screenshot(path=str(work / "dashboard.png"))
 
         before = media()["connects"]
         subprocess.run(["pkill", "-f", PUBLISH_URL])
@@ -190,8 +284,8 @@ def browser_checks() -> None:
 
         before = media()["connects"]
         stop("mediamtx")
-        down = wait(lambda: "SERVER DOWN" in media()["badge"] or None, 10)
-        check("page shows SERVER DOWN while MediaMTX is gone", down)
+        check("page shows SERVER DOWN while MediaMTX is gone",
+              wait(lambda: "SERVER DOWN" in media()["badge"] or None, 10))
         start("mediamtx", [str(mediamtx_binary()), str(work / "mediamtx.yml")])
         t0 = time.monotonic()
         back = wait(lambda: playing(after_connects=before), 45)
@@ -201,16 +295,25 @@ def browser_checks() -> None:
         page.click("#btn-hls")
         page.wait_for_timeout(1000)
         src = page.evaluate("document.getElementById('hls').src")
-        check("HLS button loads MediaMTX's HLS player", src.endswith(f":{PORTS['HLS_PORT']}/astronaut/"), src)
+        check("HLS button loads MediaMTX's player through the dashboard", src.endswith("/hls/astronaut/"), src)
         code = (wait(lambda: (lambda r: r if r[0] == 200 else None)(
-            get(f"http://127.0.0.1:{PORTS['HLS_PORT']}/astronaut/index.m3u8")), 20) or (0, ""))[0]
-        check("HLS playlist is served", code == 200, f"HTTP {code}")
+            get(f"{WEB_TLS}/hls/astronaut/index.m3u8")), 20) or (0, ""))[0]
+        check("HLS playlist is served (over HTTPS, through the dashboard)", code == 200, f"HTTP {code}")
         page.click("#btn-webrtc")
         check("switching back to WebRTC reconnects", wait(lambda: playing(10), 20))
 
+        ip = lan_ip()
+        if ip:
+            plain = context.new_page()
+            plain.goto(f"http://{ip}:{PORTS['WEB_PORT']}/")
+            shown = wait(lambda: plain.evaluate("!document.getElementById('tb-insecure').hidden"), 5)
+            check("plain HTTP page points to the secure page for talk-back", shown,
+                  plain.evaluate("document.getElementById('tb-secure-link').href"))
+            plain.close()
+
         stop("sender")
-        waiting = wait(lambda: "Waiting" in media()["overlay"] or None, 15)
-        check("sender stopped -> page says 'Waiting for astronaut feed'", waiting)
+        check("sender stopped -> page says 'Waiting for astronaut feed'",
+              wait(lambda: "Waiting" in media()["overlay"] or None, 15))
         check("no errors in the browser console", not errors, "; ".join(errors[:3]))
         browser.close()
 
@@ -223,8 +326,8 @@ def main() -> int:
         ["bash", "-c", f'. "{ROOT}/config/config.sh"; load_config; WEBRTC_IFACES=""; '
                        f'render_template "{ROOT}/jetson/mediamtx.yml.in" "{work}/mediamtx.yml"'],
         env=ENV, capture_output=True, text=True)
-    if not check("render the MediaMTX config from the template", render.returncode == 0,
-                 render.stderr.strip()):
+    if not (check("render the MediaMTX config from the template", render.returncode == 0,
+                  render.stderr.strip()) and make_certificate()):
         return 1
     try:
         start("mediamtx", [str(mediamtx_binary()), str(work / "mediamtx.yml")])
@@ -235,7 +338,8 @@ def main() -> int:
               code == 404 or (code == 200 and not body.get("ready")), f"HTTP {code}")
 
         start("app", [sys.executable, str(ROOT / "jetson/app.py")])
-        check("dashboard starts", wait(lambda: get(f"{WEB}/healthz")[0] == 200, 10))
+        check("dashboard starts on HTTP", wait(lambda: get(f"{WEB}/healthz")[0] == 200, 10))
+        check("dashboard starts on HTTPS", wait(lambda: get(f"{WEB_TLS}/healthz")[0] == 200, 10))
         feed = json.loads(get(f"{WEB}/api/status")[1])["feed"]
         check("dashboard says offline, media server up",
               not feed["live"] and feed["mediamtx"] == "up", feed["message"])
@@ -260,6 +364,9 @@ def main() -> int:
         print(f"\n{len(results) - len(failed)}/{len(results)} checks passed. "
               f"Logs and screenshot kept in {work}")
         return 1
+    if os.environ.get("E2E_KEEP"):
+        print(f"\n{len(results)}/{len(results)} checks passed. Kept (E2E_KEEP): {work}")
+        return 0
     shutil.rmtree(work, ignore_errors=True)
     print(f"\n{len(results)}/{len(results)} checks passed.")
     return 0

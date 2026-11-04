@@ -8,7 +8,7 @@ to the Jetson. Exits non-zero if something the stream needs is missing.
 
     ./probe_devices.py              # full check (~30 s)
     ./probe_devices.py --no-encode  # skip the encoder benchmarks
-    ./probe_devices.py --beep       # also play a tone on the USB speaker
+    ./probe_devices.py --beep       # also play a tone on the headphones / USB speaker
     ./probe_devices.py --json       # machine-readable output
 
 Settings (resolution, CAMERA_MATCH, MIC_MATCH, ...) come from
@@ -204,17 +204,33 @@ def check_audio(r: Report, cfg: dict, cam, seconds: float, play_beep: bool) -> N
 
     speaker, why = dv.pick_speaker(cards, camera_usb, cfg.get("SPEAKER_MATCH", ""))
     if speaker is None:
-        r.add(INFO, f"Speaker: none ({why})")
+        r.add(INFO, f"USB speaker: none ({why})")
+    else:
+        device = speaker.alsa_device("playback")
+        r.add(OK, f"USB speaker: [{speaker.id}] {speaker.name} -> {device} ({why})")
+        r.data["speaker"] = {**asdict(speaker), "alsa": device}
+        if speaker.capture and mic is not None and speaker.id != mic.id:
+            r.add(INFO, f"[{speaker.id}] also has a mic; the camera's mic is used (set MIC_MATCH to change)")
+        if play_beep:
+            ok, error = dv.beep(device)
+            r.add(OK if ok else WARN, "Played a 1 s tone on the USB speaker: did you hear it?"
+                  if ok else f"USB speaker test failed: {error}")
+
+    # Talk-back plays here: the Pi's 3.5 mm jack ("Headphones") by default.
+    match = cfg.get("TALKBACK_MATCH") or "Headphones"
+    output = dv.pick_playback(cards, match)
+    if output is None:
+        r.add(WARN, f"Talk-back output: no playback device matches TALKBACK_MATCH={match}",
+              "the Pi's 3.5 mm jack shows up as 'Headphones'; if it's missing, check that\n"
+              "/boot/firmware/config.txt has dtparam=audio=on, then reboot")
         return
-    device = speaker.alsa_device("playback")
-    r.add(OK, f"Speaker: [{speaker.id}] {speaker.name} -> {device} ({why})")
-    r.data["speaker"] = {**asdict(speaker), "alsa": device}
-    if speaker.capture and mic is not None and speaker.id != mic.id:
-        r.add(INFO, f"[{speaker.id}] also has a mic; the camera's mic is used (set MIC_MATCH to change)")
+    device = output.alsa_device("playback")
+    r.add(OK, f"Talk-back output: [{output.id}] {output.name} -> {device}")
+    r.data["talkback_output"] = {**asdict(output), "alsa": device}
     if play_beep:
         ok, error = dv.beep(device)
-        r.add(OK if ok else WARN,
-              "Played a 1 s tone on the speaker: did you hear it?" if ok else f"Speaker test failed: {error}")
+        r.add(OK if ok else WARN, "Played a 1 s tone on the talk-back output: did you hear it in the headphones?"
+              if ok else f"Talk-back output test failed: {error}")
 
 
 def check_encoders(r: Report, cfg: dict, encoders: set[str], cam, mode, seconds: float) -> None:

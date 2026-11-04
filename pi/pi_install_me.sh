@@ -21,6 +21,7 @@ report_errors
 
 CON_NAME="astro-link"
 UNIT="astronaut-sender"
+TALKBACK_UNIT="astronaut-talkback"
 CONNECT=false
 SERVICE=true
 
@@ -89,21 +90,25 @@ nmcli connection add type wifi ifname "$IFACE" con-name "$CON_NAME" \
   ipv4.never-default yes \
   ipv6.method disabled >/dev/null
 
-# The bench check needs the camera and mic, so the sender must not hold them.
-systemctl stop "$UNIT" 2>/dev/null || true
+# The bench check needs the camera, mic and headphones, so the services must
+# not hold them.
+systemctl stop "$UNIT" "$TALKBACK_UNIT" 2>/dev/null || true
 info "Bench check (encoder benchmark skipped; 'make probe' runs the full check):"
 sudo -u "$SERVICE_USER" python3 "$SCRIPT_DIR/probe_devices.py" --no-encode || true
 
 if $SERVICE; then
-  info "Installing the $UNIT service..."
+  info "Installing the $UNIT and $TALKBACK_UNIT services..."
   render_template "$SCRIPT_DIR/astronaut-sender.service.in" "/etc/systemd/system/$UNIT.service"
+  render_template "$SCRIPT_DIR/astronaut-talkback.service.in" "/etc/systemd/system/$TALKBACK_UNIT.service"
   systemctl daemon-reload
-  systemctl enable "$UNIT" >/dev/null 2>&1
-  systemctl restart "$UNIT"
+  systemctl enable "$UNIT" "$TALKBACK_UNIT" >/dev/null 2>&1
+  systemctl restart "$UNIT" "$TALKBACK_UNIT"
   sleep 1
-  systemctl is-active --quiet "$UNIT" ||
-    { journalctl -u "$UNIT" -n 20 --no-pager >&2 || true; die "the $UNIT service didn't start; see the log above"; }
-  info "$UNIT is running; it streams as soon as the Jetson answers."
+  for unit in "$UNIT" "$TALKBACK_UNIT"; do
+    systemctl is-active --quiet "$unit" ||
+      { journalctl -u "$unit" -n 20 --no-pager >&2 || true; die "the $unit service didn't start; see the log above"; }
+  done
+  info "$UNIT streams as soon as the Jetson answers; $TALKBACK_UNIT plays talk-back on the headphones."
 fi
 
 if $CONNECT; then

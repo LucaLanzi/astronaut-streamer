@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 load_config
 
 installed=()
-for unit in astronaut-mediamtx astronaut-web astronaut-sender; do
+for unit in astronaut-mediamtx astronaut-web astronaut-sender astronaut-talkback; do
   [ -f "/etc/systemd/system/$unit.service" ] && installed+=("$unit")
 done
 if [ "${#installed[@]}" -eq 0 ]; then
@@ -45,11 +45,14 @@ if p:
         print("  pi error: %s" % p["last_error"])
 else:
     print("  pi:       no heartbeat yet")
+t = s.get("talkback") or {}
+print("  talk-back: %s" % (("live, Pi listening" if t.get("listeners") else "live, Pi not playing it")
+                           if t.get("live") else "off"))
 '; then
     echo "  the dashboard isn't answering on port $WEB_PORT"
   fi
   echo
-  echo "Ground station: http://$JETSON_GROUND_IP:$WEB_PORT"
+  echo "Ground station: http://$JETSON_GROUND_IP:$WEB_PORT  (talk-back: https://$JETSON_GROUND_IP:$WEB_TLS_PORT)"
 fi
 
 if [ -f /etc/systemd/system/astronaut-sender.service ]; then   # the Pi
@@ -60,4 +63,9 @@ if [ -f /etc/systemd/system/astronaut-sender.service ]; then   # the Pi
   echo
   echo "Last sender log lines:"
   journalctl -u astronaut-sender -n 15 --no-pager -o cat 2>/dev/null | sed 's/^/  /'
+  if [ -f /etc/systemd/system/astronaut-talkback.service ]; then
+    echo
+    echo "Last talk-back log lines:"
+    journalctl -u astronaut-talkback -n 6 --no-pager -o cat 2>/dev/null | sed 's/^/  /'
+  fi
 fi

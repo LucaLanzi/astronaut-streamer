@@ -326,6 +326,13 @@ def pick_speaker(cards: list[SoundCard], camera_usb: str | None,
     return None, "no USB speaker found"
 
 
+def pick_playback(cards: list[SoundCard], match: str) -> SoundCard | None:
+    """The playback card whose id or name contains `match` (for talk-back:
+    "Headphones" is the Pi's 3.5 mm jack)."""
+    found = [c for c in cards if c.playback and c.matches(match)] if match else []
+    return found[0] if found else None
+
+
 @dataclass
 class MicResult:
     ok: bool

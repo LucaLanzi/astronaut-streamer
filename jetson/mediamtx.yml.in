@@ -47,3 +47,9 @@ paths:
     # A reconnecting Pi replaces its own stale session instead of being refused.
     overridePublisher: true
     record: false
+  @TALKBACK_PATH@:
+    # Talk-back: the ground station's mic, published from the dashboard over
+    # WebRTC (WHIP) and played on the Pi's headphones (pi/talkback.py).
+    source: publisher
+    overridePublisher: true
+    record: false

@@ -146,3 +146,56 @@ dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 dd.warn { color: var(--warn); font-weight: 600; }
 dd.bad { color: var(--bad); font-weight: 600; }
+
+/* ------------------------------------------------------------- talk-back */
+.badge.talk { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.talkback { margin-top: 16px; }
+.talkback .note { margin: 8px 0 0; color: var(--muted); }
+.talkback .note.live { color: var(--ok); font-weight: 600; }
+.talkback .note.warn { color: var(--warn); font-weight: 600; }
+.talkback a { color: var(--accent); }
+
+.field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); }
+.field select {
+  max-width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.tb-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+
+.talkback button {
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.talkback button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.talkback button.stop { background: var(--bad); border-color: var(--bad); color: #fff; }
+.talkback button.muted { border-color: var(--warn); color: var(--warn); }
+
+.meter {
+  flex: 1 1 120px;
+  min-width: 120px;
+  height: 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg);
+}
+.meter > div { width: 0; height: 100%; background: var(--ok); transition: width 80ms linear; }
+
+kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: 12px ui-monospace, monospace;
+}
