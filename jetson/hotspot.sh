@@ -17,7 +17,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 load_config
 
 CON_NAME="astro-hotspot"
-IFACE="$JETSON_HOTSPOT_IFACE"
+# The configured interface, else the first Wi-Fi device (names differ by
+# Jetson model: wlan0, wlP1p1s0, ...).
+IFACE="$(wifi_iface "$JETSON_HOTSPOT_IFACE")"
 
 usage() {
   sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -39,6 +41,7 @@ band_name() {
 cmd_up() {
   require_root
   need nmcli iw
+  [ -n "$IFACE" ] || die "no Wi-Fi interface found (see 'nmcli device'; PLAN.md §8 has the USB adapter fallback)"
   nm_has_wifi "$IFACE" || die "no NetworkManager Wi-Fi interface '$IFACE' (see 'nmcli device'; set JETSON_HOTSPOT_IFACE)"
   supports_ap || die "this Wi-Fi card doesn't list AP mode in 'iw list'; see PLAN.md §8 for the USB adapter fallback"
   command -v dnsmasq >/dev/null 2>&1 || die "NetworkManager needs dnsmasq to hand out addresses: sudo apt install dnsmasq-base"

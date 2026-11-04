@@ -1,9 +1,11 @@
 # astronaut-streamer — Implementation Plan
 
-> **Status:** Phase 0 tools are written (`jetson/hotspot.sh`,
-> `pi/pi_install_me.sh`, `pi/probe_devices.py`); Phase 1 is next. Answered
-> questions are in [§9 Decisions](#9-decisions); items still marked
-> *(assumed)* wait on the [remaining questions](#10-remaining-questions).
+> **Status:** all software for phases 0-5 is written and passes its tests:
+> unit tests, plus `make e2e`, which runs the real pipeline on a laptop and
+> checks it in headless Chrome. What's left is the hardware testing in
+> [docs/TEST_CHECKLIST.md](docs/TEST_CHECKLIST.md), which covers phases 0-6.
+> How to install and run it: [docs/SETUP.md](docs/SETUP.md). Answered
+> questions are in [§9 Decisions](#9-decisions).
 
 ## 1. Goal
 
@@ -424,39 +426,48 @@ installer opens the ports above.
 
 Its own repo, **`LucaLanzi/astronaut-streamer`**, added to
 billee-hardware-2027 as a submodule at `astronaut-streamer/` on `lucadev`
-*(decided)*, like the F´ submodules. ✓ = written.
+*(decided)*, like the F´ submodules.
 
 ```
 astronaut-streamer/
-├── PLAN.md                     # this file                                              ✓
-├── README.md                   # quick start; troubleshooting added in Phase 7          ✓
+├── Makefile                    # every command; `make` lists them
+├── PLAN.md                     # this file
+├── README.md                   # overview + quick start
+├── docs/
+│   ├── SETUP.md                # install and run, top to bottom; troubleshooting
+│   └── TEST_CHECKLIST.md       # hardware test plan with acceptance targets
 ├── config/
-│   ├── astronaut.env           # SSID, IPs, ports, resolution, bitrate, device overrides ✓
+│   ├── astronaut.env           # settings shared by both machines
 │   ├── astronaut.local.env     # per-machine overrides + hotspot password (git-ignored)
-│   └── config.sh               # shell helpers: config loading, password prompt       ✓
+│   └── config.sh               # shell helpers: settings, templates, MediaMTX fetch + SHA-256
+├── common/
+│   └── envconfig.py            # the same settings loader for Python
 ├── pi/
-│   ├── pi_install_me.sh        # packages, Wi-Fi country, SSH, join hotspot (fixed IP) ✓
-│   ├── devices.py              # discovery: camera, its mic, speaker, encoders, health ✓
-│   ├── probe_devices.py        # Phase 0 bench check                                    ✓
-│   ├── sender.py               # supervisor: discovery → ffmpeg → restart/backoff → heartbeat
-│   └── astronaut-sender.service
+│   ├── pi_install_me.sh        # packages, Wi-Fi country, SSH, hotspot profile, service
+│   ├── devices.py              # discovery: camera, its mic, speaker, encoders, health
+│   ├── probe_devices.py        # Phase 0 bench check
+│   ├── sender.py               # supervisor: discovery → ffmpeg → restart/fallback → heartbeat
+│   └── astronaut-sender.service.in
 ├── jetson/
-│   ├── hotspot.sh              # create/start/stop/remove/status the nmcli hotspot      ✓
-│   ├── jetson_install_me.sh    # MediaMTX (pinned), venv, services, ufw
-│   ├── mediamtx.yml
-│   ├── mediamtx.service
-│   ├── app.py                  # Flask web applet
+│   ├── jetson_install_me.sh    # packages, MediaMTX (pinned + checksum), services, ufw
+│   ├── hotspot.sh              # up/start/stop/remove/status for the nmcli hotspot
+│   ├── mediamtx.yml.in         # rendered to /etc/astronaut-streamer/mediamtx.yml
+│   ├── astronaut-mediamtx.service.in
+│   ├── app.py                  # dashboard: page, /api/status, /api/heartbeat
 │   ├── templates/index.html
-│   ├── static/player.js        # WHEP player, unmute, reconnect, HLS fallback
-│   ├── astronaut-web.service
+│   ├── static/player.js        # WHEP player, one-click audio, reconnect, HLS fallback
+│   ├── static/style.css
+│   ├── astronaut-web.service.in
 │   └── local_view.sh           # ffplay viewer (bench testing)
-└── tests/
-    └── test_devices.py         # device parsing/selection, config, ffmpeg helpers     ✓
+├── tools/
+│   ├── status.sh, uninstall.sh
+│   └── e2e_setup.sh, e2e_local.py   # `make e2e`
+└── tests/                      # test_devices, test_sender, test_app, test_shell
 ```
 
-billee-hardware-2027's top-level `Makefile` gains targets in the same style as
-`make science`: `make astronaut pi`, `make astronaut jetson`,
-`make astronaut view`. Its README's repository layout gets an entry.
+billee-hardware-2027's top-level `Makefile` passes `make astronaut <target>`
+on to this Makefile (for example `make astronaut jetson`), and its README
+links here.
 
 ## 6. Phases
 
@@ -504,6 +515,7 @@ billee-hardware-2027's top-level `Makefile` gains targets in the same style as
 | Latency creeps up over TCP on a weak link | Switch transport to SRT (config flag) |
 | Prism link throughput at competition distance, shared with other rover traffic | Measure in Phase 6; bitrate is one setting; 480p @ ~800 kbps is still usable |
 | ROS2 DDS multicast floods the hotspot | Limit DDS to `eth0`/`lo` (§3.1) |
+| A MediaMTX upgrade changes a default (1.21 turned on MoQ, which writes files and hangs on shutdown) | Version pinned with its SHA-256 in `config/config.sh`; before upgrading, change `MEDIAMTX_VERSION` and run `make e2e` against the new binary |
 
 ## 9. Decisions
 

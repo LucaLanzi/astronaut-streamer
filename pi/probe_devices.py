@@ -273,7 +273,7 @@ def report_encode(r: Report, res: dv.EncodeResult, live: bool) -> None:
 
 def check_network(r: Report, cfg: dict) -> None:
     r.heading("Wi-Fi link to the Jetson")
-    iface = cfg.get("PI_WIFI_IFACE") or "wlan0"
+    iface = dv.wifi_iface(cfg.get("PI_WIFI_IFACE", ""))
     ssid = cfg.get("HOTSPOT_SSID") or "ASTRO-LINK"
     link = dv.wifi_link(iface)
     r.data["wifi"] = link

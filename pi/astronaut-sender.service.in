@@ -1,0 +1,21 @@
+[Unit]
+Description=astronaut-streamer: USB camera + mic -> Jetson
+Documentation=file://@ASTRO_ROOT@/docs/SETUP.md
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+User=@SERVICE_USER@
+SupplementaryGroups=video audio
+ExecStart=/usr/bin/python3 -u @ASTRO_ROOT@/pi/sender.py
+Restart=always
+RestartSec=3
+# Encoding first if the Pi gets busy.
+Nice=-5
+# SIGTERM to sender.py only, which stops ffmpeg cleanly; anything left after
+# TimeoutStopSec is killed.
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+[Unit]
+Description=astronaut-streamer: MediaMTX media server (Pi stream in, WebRTC/HLS out)
+Documentation=file://@ASTRO_ROOT@/docs/SETUP.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/mediamtx /etc/astronaut-streamer/mediamtx.yml
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+# Nothing to write (recording is off), so run as a throwaway user, read-only.
+DynamicUser=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

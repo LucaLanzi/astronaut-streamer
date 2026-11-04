@@ -3,3 +3,8 @@ config/astronaut.local.env
 
 __pycache__/
 *.pyc
+
+# MediaMTX downloads kept for offline re-installs
+vendor/
+# make e2e's private Python environment
+.e2e-venv/

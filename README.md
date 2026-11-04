@@ -5,90 +5,69 @@ astronaut) to a **Jetson Orin** (the rover) over the Jetson's Wi-Fi hotspot.
 The Jetson forwards the feed to a browser at the **ground station** over the
 Ubiquiti Prism link, at **`http://10.110.0.230:8080`**.
 
-Part of BILLEE ([billee-hardware-2027](https://github.com/BroncoSpace-BILLEE/billee-hardware-2027)).
-The full design (architecture, ports, phases, failure modes, decisions) is
-in [PLAN.md](PLAN.md).
+Part of BILLEE ([billee-hardware-2027](https://github.com/BroncoSpace-BILLEE/billee-hardware-2027),
+where it's the `astronaut-streamer` submodule).
 
 ```
 USB camera + mic ─► Pi 4B ──Wi-Fi hotspot──► Jetson Orin ──Prism link──► ground-station browser
-                    (ffmpeg)  10.42.0.2 → .1  (MediaMTX + Flask)  10.110.0.230:8080
+                    sender     10.42.0.2 → .1  MediaMTX + dashboard  10.110.0.230:8080
 ```
 
-## Status
+- **Pi:** `pi/sender.py` runs ffmpeg (H.264 + Opus) pushing one RTSP stream
+  to the Jetson. It waits for the Jetson, survives camera replugs and Wi-Fi
+  drops, falls back to software encoding if the hardware encoder fails, sends
+  video only if the mic fails, and reports the Pi's health.
+- **Jetson:** [MediaMTX](https://github.com/bluenviron/mediamtx) turns the
+  stream into WebRTC (low latency) and HLS (fallback) without re-encoding.
+  `jetson/app.py` serves the dashboard: player, one-click audio, stream and Pi
+  status.
+- **Ground station:** any Chrome or Firefox; no plugins, no internet.
 
-Phase 0 (bench check) is ready. Streaming itself comes next; see the phases
-in [PLAN.md §6](PLAN.md#6-phases).
-
-| Piece | Runs on | State |
-|---|---|---|
-| `jetson/hotspot.sh` — Wi-Fi hotspot for the Pi | Jetson | ready |
-| `pi/pi_install_me.sh` — packages, SSH, joins the hotspot | Pi | ready |
-| `pi/probe_devices.py` — camera, mic, speaker, encoder, Wi-Fi check | Pi | ready |
-| MediaMTX, `pi/sender.py`, Flask dashboard | both | next |
-
-## Phase 0: bring-up
-
-**Jetson** (JetPack 6):
+## Quick start
 
 ```bash
-sudo ./jetson/hotspot.sh up       # asks for the Wi-Fi password; starts at every boot after this
-./jetson/hotspot.sh status        # hotspot state and connected devices
+make            # list the commands
+make e2e        # optional: run the whole pipeline on your laptop first (21 checks)
+make jetson     # on the Jetson: everything, hotspot included
+make pi         # on the Pi: everything, sender service included
+make probe      # on the Pi: bench check (camera, mic, speaker, encoders, Wi-Fi)
+make status     # on either: what's running
 ```
 
-**Pi** (Raspberry Pi OS Lite 64-bit, Bookworm), while it still has internet:
+From billee-hardware-2027's root, use `make astronaut <command>`.
 
-```bash
-sudo ./pi/pi_install_me.sh        # packages, SSH, saves the hotspot (Pi = 10.42.0.2)
-./pi/probe_devices.py             # camera modes, mic level, speaker, H.264 encoders, Wi-Fi
-./pi/probe_devices.py --beep      # also play a test tone on the USB speaker
-sudo nmcli connection up astro-link   # switch to the hotspot now (it joins by itself at boot)
-```
-
-To skip the password prompt, put `HOTSPOT_PSK=<password>` in
-`config/astronaut.local.env` (git-ignored) on each machine.
-
-## Reaching the Pi from the ground station
-
-The Pi is on the hotspot behind the Jetson, so SSH goes through the Jetson.
-In `~/.ssh/config` on the ground-station laptop:
-
-```
-Host jetson
-    HostName 10.110.0.230
-    User <jetson-user>
-
-Host astronaut-pi
-    HostName 10.42.0.2
-    User <pi-user>
-    ProxyJump jetson
-```
-
-Then `ssh astronaut-pi`. Run `ssh-copy-id jetson` and `ssh-copy-id astronaut-pi`
-once to stop the password prompts.
-
-## Settings
-
-Everything lives in [`config/astronaut.env`](config/astronaut.env): hotspot
-SSID/channel and addresses, the Jetson's ground-side IP, resolution, frame
-rate, bitrates, and optional `CAMERA_MATCH` / `MIC_MATCH` / `SPEAKER_MATCH` if
-auto-detection picks the wrong device. `config/astronaut.local.env` overrides
-it per machine, and environment variables override both:
-
-```bash
-VIDEO_WIDTH=640 VIDEO_HEIGHT=480 ./pi/probe_devices.py
-```
+**Full guide, from flashing the Pi to day-to-day use and troubleshooting:
+[docs/SETUP.md](docs/SETUP.md).** To prove it works, step by step:
+[docs/TEST_CHECKLIST.md](docs/TEST_CHECKLIST.md). Design and decisions:
+[PLAN.md](PLAN.md).
 
 ## Layout
 
 ```
-config/   astronaut.env (settings), config.sh (shell helpers)
-jetson/   hotspot.sh
-pi/       pi_install_me.sh, probe_devices.py, devices.py (device discovery library)
-tests/    unit tests (standard library only)
+Makefile               all commands (`make` lists them)
+config/astronaut.env   settings shared by both machines (overrides: astronaut.local.env)
+config/config.sh       shell helpers: settings, templates, MediaMTX download + checksum
+common/envconfig.py    the same settings loader for Python
+pi/                    sender.py, devices.py, probe_devices.py, pi_install_me.sh, service
+jetson/                app.py + templates/static (dashboard), mediamtx.yml.in,
+                       jetson_install_me.sh, hotspot.sh, local_view.sh, services
+tools/                 status.sh, uninstall.sh, e2e_local.py + e2e_setup.sh
+tests/                 unit tests (standard library; dashboard tests need Flask)
+docs/                  SETUP.md, TEST_CHECKLIST.md
 ```
 
-## Tests
+## Development
 
 ```bash
-python3 -m unittest discover -s tests -v
+make test       # unit tests: ffmpeg command, failure handling, supervisor
+                # (with a fake ffmpeg), dashboard, shell/Python config parity
+make lint       # shellcheck + Python compile check
+make e2e        # real MediaMTX + dashboard + test-pattern sender, checked in
+                # headless Chrome, including recovery from failures
 ```
+
+Tested on Python 3.10 with Flask 2.0.1 and waitress 2.0.0 (what the Jetson's
+Ubuntu 22.04 ships), and on current Python and Flask.
+
+To work on it, push to `main` here, then update the submodule pointer on
+billee-hardware-2027's `lucadev` branch.

@@ -15,12 +15,14 @@ import os
 import re
 import resource
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parent.parent
-CONFIG_DIR = ROOT / "config"
+sys.path.insert(0, str(ROOT / "common"))
+from envconfig import CONFIG_DIR, load_config, parse_env  # noqa: E402,F401  (re-exported)
 
 
 # --------------------------------------------------------------------- helpers
@@ -48,45 +50,6 @@ def _read(path: str | Path, default: str = "") -> str:
         return Path(path).read_text(errors="replace").strip()
     except OSError:
         return default
-
-
-# ---------------------------------------------------------------------- config
-
-_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
-
-def parse_env(text: str) -> dict[str, str]:
-    """Parse KEY=value lines the way `source` would for simple files:
-    blank lines and # comments skipped, optional `export`, optional matching
-    quotes around the value."""
-    values: dict[str, str] = {}
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export "):].lstrip()
-        key, sep, value = line.partition("=")
-        if not sep or not _KEY_RE.fullmatch(key):
-            continue
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
-        values[key] = value
-    return values
-
-
-def load_config(config_dir: Path = CONFIG_DIR) -> dict[str, str]:
-    """astronaut.env, overridden by astronaut.local.env, overridden by any
-    environment variable of the same name (`VIDEO_WIDTH=640 ./probe_devices.py`)."""
-    values: dict[str, str] = {}
-    for name in ("astronaut.env", "astronaut.local.env"):
-        path = Path(config_dir) / name
-        if path.is_file():
-            values.update(parse_env(path.read_text()))
-    for key in values:
-        if key in os.environ:
-            values[key] = os.environ[key]
-    return values
 
 
 # ------------------------------------------------------------------------ USB
@@ -577,3 +540,17 @@ def parse_iw_link(text: str) -> dict:
 
 def wifi_link(iface: str = "wlan0") -> dict:
     return parse_iw_link(run(["iw", "dev", iface, "link"]).stdout)
+
+
+def wifi_iface(configured: str = "", sysfs_net: str = "/sys/class/net") -> str:
+    """The configured Wi-Fi interface, else the first wireless one (wlan0 on a Pi)."""
+    if configured:
+        return configured
+    try:
+        names = sorted(os.listdir(sysfs_net))
+    except OSError:
+        names = []
+    for name in names:
+        if os.path.isdir(os.path.join(sysfs_net, name, "wireless")):
+            return name
+    return "wlan0"

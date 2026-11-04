@@ -2,13 +2,15 @@
 # One-time setup for the astronaut Pi: Raspberry Pi 4B, Raspberry Pi OS Lite
 # 64-bit (Bookworm) (PLAN.md §3.2).
 #
-#   sudo ./pi_install_me.sh            install packages, enable SSH, save the
-#                                      Jetson hotspot as the Pi's Wi-Fi
-#   sudo ./pi_install_me.sh --connect  ...and switch to the hotspot now
+#   sudo ./pi_install_me.sh               packages, Wi-Fi country, SSH, hotspot
+#                                         profile, bench check, sender service
+#   sudo ./pi_install_me.sh --connect     ...and switch to the hotspot now
+#   sudo ./pi_install_me.sh --no-service  ...without installing the sender service
 #
 # Run it while the Pi still has internet (apt needs it). Afterwards the Pi joins
-# the hotspot by itself whenever it's in range, at the fixed address PI_HOTSPOT_IP.
-# Settings: config/astronaut.env (+ config/astronaut.local.env for the password).
+# the hotspot by itself whenever it's in range, at the fixed address
+# PI_HOTSPOT_IP, and the sender service streams as soon as the Jetson answers.
+# Safe to re-run. Settings: config/astronaut.env (+ astronaut.local.env).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,23 +19,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 load_config
 
 CON_NAME="astro-link"
+UNIT="astronaut-sender"
 CONNECT=false
+SERVICE=true
 
 usage() {
-  sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 for arg in "$@"; do
   case "$arg" in
     --connect) CONNECT=true ;;
+    --no-service) SERVICE=false ;;
     -h | --help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
 done
 
 require_root
-REAL_USER="${SUDO_USER:-}"
-[ "$REAL_USER" = root ] && REAL_USER=""
+SERVICE_USER="${SUDO_USER:-}"
+{ [ -n "$SERVICE_USER" ] && [ "$SERVICE_USER" != root ]; } ||
+  die "run this with sudo from your normal account: the sender runs as that user"
+
 # Raspberry Pi OS keeps Wi-Fi switched off (rfkill) until a Wi-Fi country is set.
 if command -v raspi-config >/dev/null 2>&1; then
   raspi-config nonint do_wifi_country "$WIFI_COUNTRY" || warn "couldn't set the Wi-Fi country to $WIFI_COUNTRY"
@@ -42,7 +49,9 @@ if command -v rfkill >/dev/null 2>&1; then
   rfkill unblock wifi || true
 fi
 need nmcli
-nm_has_wifi "$PI_WIFI_IFACE" || die "no NetworkManager Wi-Fi interface '$PI_WIFI_IFACE' (see 'nmcli device'; set PI_WIFI_IFACE)"
+IFACE="$(wifi_iface "$PI_WIFI_IFACE")"
+[ -n "$IFACE" ] || die "no Wi-Fi interface found (see 'nmcli device')"
+nm_has_wifi "$IFACE" || die "no NetworkManager Wi-Fi interface '$IFACE' (see 'nmcli device'; set PI_WIFI_IFACE)"
 ask_psk
 
 info "Installing packages (needs internet)..."
@@ -61,12 +70,10 @@ fi
 info "Enabling SSH..."
 systemctl enable --now ssh
 
-if [ -n "$REAL_USER" ]; then
-  info "Adding $REAL_USER to the video and audio groups (camera and mic access over SSH)..."
-  usermod -aG video,audio "$REAL_USER"
-fi
+info "Adding $SERVICE_USER to the video and audio groups (camera and mic access)..."
+usermod -aG video,audio "$SERVICE_USER"
 
-info "Saving the hotspot '$HOTSPOT_SSID' as $CON_NAME ($PI_HOTSPOT_IP)..."
+info "Saving the hotspot '$HOTSPOT_SSID' as $CON_NAME on $IFACE ($PI_HOTSPOT_IP)..."
 if nm_has_connection "$CON_NAME"; then
   nmcli connection delete "$CON_NAME" >/dev/null
 fi
@@ -74,7 +81,7 @@ fi
 # network it knows. Fixed address below NetworkManager's DHCP range (.10-.254).
 # never-default: the hotspot only carries the stream, so it never takes over
 # the Pi's internet route while another network is still connected.
-nmcli connection add type wifi ifname "$PI_WIFI_IFACE" con-name "$CON_NAME" \
+nmcli connection add type wifi ifname "$IFACE" con-name "$CON_NAME" \
   connection.autoconnect yes connection.autoconnect-priority 100 \
   ssid "$HOTSPOT_SSID" \
   802-11-wireless.powersave 2 \
@@ -83,18 +90,28 @@ nmcli connection add type wifi ifname "$PI_WIFI_IFACE" con-name "$CON_NAME" \
   ipv4.never-default yes \
   ipv6.method disabled >/dev/null
 
-info "Bench check (encoder benchmark skipped; run ./probe_devices.py for the full check):"
-if [ -n "$REAL_USER" ]; then
-  sudo -u "$REAL_USER" python3 "$SCRIPT_DIR/probe_devices.py" --no-encode || true
-else
-  python3 "$SCRIPT_DIR/probe_devices.py" --no-encode || true
+# The bench check needs the camera and mic, so the sender must not hold them.
+systemctl stop "$UNIT" 2>/dev/null || true
+info "Bench check (encoder benchmark skipped; 'make probe' runs the full check):"
+sudo -u "$SERVICE_USER" python3 "$SCRIPT_DIR/probe_devices.py" --no-encode || true
+
+if $SERVICE; then
+  info "Installing the $UNIT service..."
+  render_template "$SCRIPT_DIR/astronaut-sender.service.in" "/etc/systemd/system/$UNIT.service"
+  systemctl daemon-reload
+  systemctl enable "$UNIT" >/dev/null 2>&1
+  systemctl restart "$UNIT"
+  sleep 1
+  systemctl is-active --quiet "$UNIT" ||
+    { journalctl -u "$UNIT" -n 20 --no-pager >&2 || true; die "the $UNIT service didn't start; see the log above"; }
+  info "$UNIT is running; it streams as soon as the Jetson answers."
 fi
 
 if $CONNECT; then
   echo
   warn "switching Wi-Fi to '$HOTSPOT_SSID': if you're connected to this Pi over Wi-Fi, this session will drop"
   nmcli connection up "$CON_NAME" >/dev/null ||
-    die "couldn't join '$HOTSPOT_SSID'; is the Jetson's hotspot up and in range? (on the Jetson: jetson/hotspot.sh status)"
+    die "couldn't join '$HOTSPOT_SSID'; is the Jetson's hotspot up and in range? (on the Jetson: make hotspot)"
   if ping -c 2 -W 2 "$JETSON_HOTSPOT_IP" >/dev/null 2>&1; then
     info "Joined '$HOTSPOT_SSID'; the Jetson ($JETSON_HOTSPOT_IP) answers."
   else
@@ -107,9 +124,7 @@ cat <<EOF
 Done.
   - The Pi joins '$HOTSPOT_SSID' as $PI_HOTSPOT_IP whenever it's in range.
     To switch now: sudo nmcli connection up $CON_NAME
-  - SSH is on. From the ground station: ssh astronaut-pi (through the Jetson; see PLAN.md §3.1).
-  - Full bench check, including the encoder benchmark: $SCRIPT_DIR/probe_devices.py
+  - SSH is on. From the ground station: ssh astronaut-pi (through the Jetson; docs/SETUP.md).
+  - Full bench check, including the encoder benchmark: make probe
+  - Service state and logs: make status / make logs
 EOF
-if [ -n "$REAL_USER" ]; then
-  echo "  - Log out and back in once so $REAL_USER's new video/audio groups take effect."
-fi

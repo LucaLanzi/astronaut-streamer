@@ -1,0 +1,15 @@
+[Unit]
+Description=astronaut-streamer: ground-station dashboard on port @WEB_PORT@
+Documentation=file://@ASTRO_ROOT@/docs/SETUP.md
+After=network-online.target astronaut-mediamtx.service
+Wants=network-online.target
+
+[Service]
+User=@SERVICE_USER@
+ExecStart=/usr/bin/python3 -u @ASTRO_ROOT@/jetson/app.py
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

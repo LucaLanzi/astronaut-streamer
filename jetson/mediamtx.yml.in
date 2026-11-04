@@ -1,0 +1,49 @@
+# MediaMTX config for astronaut-streamer (PLAN.md §3.3).
+#
+# jetson_install_me.sh renders this into /etc/astronaut-streamer/mediamtx.yml,
+# filling in each @...@ placeholder from config/astronaut.env. Change this
+# template or the settings file and re-run the installer; don't edit the copy
+# in /etc. Keys not set here keep MediaMTX's defaults, including its default
+# users: anyone may publish and read, and only localhost may use the API.
+
+logLevel: info
+logDestinations: [stdout]
+
+# Status API for the dashboard. Localhost only.
+api: true
+apiAddress: 127.0.0.1:@MEDIAMTX_API_PORT@
+
+# The Pi publishes here (RTSP over TCP by default, SRT if TRANSPORT=srt).
+# TCP only: RTSP over UDP would also take ports 8000-8001, and nothing here
+# uses it (the Pi, ffplay and OBS all use TCP).
+rtsp: true
+rtspTransports: [tcp]
+rtspAddress: :@RTSP_PORT@
+srt: true
+srtAddress: :@SRT_PORT@
+rtmp: false
+# MoQ (Media over QUIC, new in MediaMTX 1.21) is on by default. Nothing here
+# uses it, and with it on MediaMTX tries to save a certificate in its working
+# folder (read-only under the service), opens ports 8892-8893, and hangs on
+# shutdown, so every restart would wait out systemd's stop timeout.
+moq: false
+
+# What browsers play: WebRTC (low latency), LL-HLS (fallback).
+webrtc: true
+webrtcAddress: :@WEBRTC_PORT@
+webrtcLocalUDPAddress: :@WEBRTC_UDP_PORT@
+# Offer only the Prism-side and hotspot addresses, not Docker or other
+# virtual interfaces (empty list = every interface).
+webrtcIPsFromInterfaces: true
+webrtcIPsFromInterfacesList: [@WEBRTC_IFACES@]
+webrtcAdditionalHosts: []
+hls: true
+hlsAddress: :@HLS_PORT@
+hlsVariant: lowLatency
+
+paths:
+  @STREAM_PATH@:
+    source: publisher
+    # A reconnecting Pi replaces its own stale session instead of being refused.
+    overridePublisher: true
+    record: false

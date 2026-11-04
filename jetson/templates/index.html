@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Astronaut feed</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="top">
+    <h1>Astronaut feed</h1>
+    <div class="badges">
+      <span id="badge-feed" class="badge">…</span>
+      <span id="badge-audio" class="badge warn" hidden>NO AUDIO</span>
+      <span id="badge-pi" class="badge warn" hidden>PI SILENT</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="player">
+      <div id="screen" class="screen">
+        <video id="video" autoplay playsinline muted></video>
+        <iframe id="hls" title="HLS player" allow="autoplay; fullscreen" hidden></iframe>
+        <div id="overlay" class="overlay">Connecting…</div>
+        <button id="unmute" class="unmute" type="button" hidden>🔊 Click for audio</button>
+      </div>
+      <div class="controls">
+        <button id="btn-webrtc" type="button">Low latency (WebRTC)</button>
+        <button id="btn-hls" type="button">Compatibility (HLS)</button>
+        <button id="btn-fullscreen" type="button">Fullscreen</button>
+      </div>
+    </section>
+
+    <aside class="panels">
+      <section class="panel">
+        <h2>Stream</h2>
+        <dl id="stream-info"></dl>
+      </section>
+      <section class="panel">
+        <h2>Astronaut Pi</h2>
+        <dl id="pi-info"></dl>
+      </section>
+    </aside>
+  </main>
+
+  <script type="application/json" id="page-config">{{ page_config|safe }}</script>
+  <script src="{{ url_for('static', filename='player.js') }}"></script>
+</body>
+</html>
